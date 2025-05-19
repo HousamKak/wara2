@@ -17,16 +17,17 @@ from utils.telegram_utils import (
     make_hand_keyboard,
     generate_ai_name
 )
-from utils.cards import get_card_emoji
+from utils.cards import get_card_emoji, card_value, get_neighbor_position
 from handlers.command_handlers import (
     setup_game,
     process_all_gifts,
     show_trick_board,
     handle_trick_winner,
     notify_next_player,
-    handle_ai_play
+    handle_ai_play,
+    player_status_messages,
+    player_hand_messages
 )
-from utils.cards import get_neighbor_position, get_card_emoji
 from telegram import InputMediaPhoto
 import asyncio
 from utils.retry_helper import retry_on_rate_limit
@@ -405,35 +406,54 @@ async def handle_gift_selection(update: Update, context: ContextTypes.DEFAULT_TY
         gift_to_position = get_neighbor_position(position)
         recipient_name = game["player_names"].get(gift_to_position, f"the {gift_to_position.capitalize()} player")
         
-        # Show confirmation message - SEND NEW MESSAGE instead of editing
+        # Update status message with confirmation
         gifted_cards_text = ", ".join(get_card_emoji((rank, suit)) for rank, suit in gifted_cards)
-        
-        # Delete the previous message if possible
-        try:
-            await query.message.delete()
-        except:
-            pass  # Ignore if we can't delete
-        
-        # Send a new confirmation message
-        await context.bot.send_message(
-            user_id,
+        status_text = (
             f"✅ You've selected these 3 cards to gift to {recipient_name}:\n"
             f"{gifted_cards_text}\n\n"
             f"Waiting for all players to select their cards..."
         )
+        
+        # Update or create status message
+        if user_id in player_status_messages:
+            try:
+                await context.bot.edit_message_text(
+                    text=status_text,
+                    chat_id=user_id,
+                    message_id=player_status_messages[user_id]
+                )
+            except Exception as e:
+                logger.error(f"Could not update status message: {e}")
+                # If updating fails, try to delete old message
+                try:
+                    await query.message.delete()
+                except:
+                    pass
+                # Send new message
+                msg = await context.bot.send_message(user_id, status_text)
+                player_status_messages[user_id] = msg.message_id
+        else:
+            # Try to delete old message with keyboard
+            try:
+                await query.message.delete()
+            except:
+                pass
+            # Send new status message
+            msg = await context.bot.send_message(user_id, status_text)
+            player_status_messages[user_id] = msg.message_id
         
         # Check if all players have selected their cards
         all_selected = all(len(cards) == 3 for cards in game["gifted_cards"].values())
         
         if all_selected:
             # Call the command handler's process_all_gifts function
-            # This will in turn call game_state_manager.process_all_gifts
-            # Let it handle all the notifications and hand updates
             await process_all_gifts(context, chat_id)
 
 
 async def handle_card_play(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle playing a card."""
+    """Handle playing a card with no announcements in group chat.
+    Updates status message instead of sending new ones.
+    """
     query = update.callback_query
     user_id = query.from_user.id
     data = query.data
@@ -460,20 +480,14 @@ async def handle_card_play(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             pass
         return
     
-    logger.info(f"Game found for user {user_id}. Phase: {game['game_phase']}")
-    
     # Check if it's this player's turn
     current_position = ["top", "left", "bottom", "right"][game["current_player_index"]]
     current_player_id = game["player_positions"].get(current_position)
-    
-    logger.info(f"Current position: {current_position}, Current player ID: {current_player_id}, User ID: {user_id}")
     
     if user_id != current_player_id:
         logger.warning(f"Not user's turn. Current player: {current_player_id}, User: {user_id}")
         await query.answer("It's not your turn!")
         return
-    
-    logger.info(f"It is user {user_id}'s turn")
     
     if data.startswith("play_"):
         # Extract card info
@@ -530,51 +544,41 @@ async def handle_card_play(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         # Get card emoji for message
         card_emoji = get_card_emoji(played_card)
         
-        # Send a new message instead of editing
+        # Delete the old message with the keyboard
         try:
-            # Delete the old message with the keyboard
             await query.message.delete()
         except Exception as e:
             logger.error(f"Could not delete message: {e}")
         
-        try:
-            await context.bot.send_message(
-                user_id,
-                f"You played: {card_emoji}\n\n"
-                f"Waiting for other players..."
-            )
-        except Exception as e:
-            logger.error(f"Could not send confirmation message: {e}")
+        # Update status message instead of sending a new one
+        status_text = f"You played: {card_emoji}\n\nWaiting for other players..."
         
-        # Notify the group about the play
-        try:
-            await context.bot.send_message(
-                chat_id,
-                f"{player.get_name()} played: {card_emoji}"
-            )
-        except Exception as e:
-            logger.error(f"Could not send play notification: {e}")
+        if user_id in player_status_messages:
+            try:
+                await context.bot.edit_message_text(
+                    text=status_text,
+                    chat_id=user_id,
+                    message_id=player_status_messages[user_id]
+                )
+            except Exception as e:
+                logger.error(f"Could not update status message: {e}")
+                msg = await context.bot.send_message(user_id, status_text)
+                player_status_messages[user_id] = msg.message_id
+        else:
+            msg = await context.bot.send_message(user_id, status_text)
+            player_status_messages[user_id] = msg.message_id
         
-        # Show the trick board in the group chat
-        try:
-            await show_trick_board(context, chat_id)
-        except Exception as e:
-            logger.error(f"Could not update trick board: {e}")
+        # Update the trick board in all chats
+        await show_trick_board(context, chat_id)
         
         # Check if the trick is complete
-        # Capture the trick before clearing it
         completed_trick = list(game["trick_pile"])  # Snapshot of the trick pile
         winner_id = game_state_manager.handle_trick_completion(chat_id)
 
         if winner_id is not None:
-            # Score the trick you just captured
-            from utils.cards import card_value
+            # Calculate trick points
             trick_points = sum(card_value(card) for card in completed_trick)
-            logger.info(f"→ Trick was worth {trick_points} points")
-
-            # Pass that into your winner handler so it can display it
             await handle_trick_winner(context, chat_id, winner_id, trick_points)
-            return
         else:
             # Check if the next player is an AI
             game = game_state_manager.get_game(chat_id)
@@ -584,19 +588,7 @@ async def handle_card_play(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 next_player = next((p for p in game["all_players"] if p.get_id() == next_player_id), None)
                 
                 if next_player and next_player.is_ai:
-                    # Slight delay for more natural gameplay
-                    await asyncio.sleep(2)
                     await handle_ai_play(context, chat_id, next_player)
                 else:
                     # Notify the human player it's their turn
                     await notify_next_player(context, chat_id)
-    
-    # SCORING LOGGING
-    from utils.cards import card_value
-    trick_points = 0
-    
-    for card in game["trick_pile"]:
-        card_point_value = card_value(card)
-        logger.info(f"[SCORING] Adding {card[0]} of {card[1]} → {card_point_value} points")
-        trick_points += card_point_value
-        logger.info(f"[SCORING] Total trick points: {trick_points}")

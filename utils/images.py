@@ -296,3 +296,29 @@ def create_hand_image(
     img_bytes.seek(0)
     
     return img_bytes
+
+# Add a utility function to create a fresh image buffer
+def create_fresh_image_buffer(image_generator_func, *args):
+    """Safely create a BytesIO buffer with image data.
+    
+    Args:
+        image_generator_func: Function that generates the image
+        *args: Arguments to pass to the image generator function
+        
+    Returns:
+        A fresh BytesIO buffer containing the image or None if generation fails
+    """
+    try:
+        # Get the image bytes
+        buffer = image_generator_func(*args)
+        
+        # Ensure the buffer is non-empty and positioned at the start
+        if buffer and buffer.getbuffer().nbytes > 0:
+            buffer.seek(0)
+            return buffer
+        else:
+            logger.error(f"Generated empty image buffer")
+            return None
+    except Exception as e:
+        logger.error(f"Failed to generate image: {e}")
+        return None

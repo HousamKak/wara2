@@ -34,6 +34,12 @@ from utils.retry_helper import retry_on_rate_limit
 # Configure logger
 logger = logging.getLogger(__name__)
 
+# Global variables to track message IDs
+last_board_messages = {}  # chat_id -> message_id
+player_board_messages = {}  # player_id -> message_id
+player_status_messages = {}  # player_id -> message_id
+player_hand_messages = {}  # player_id -> message_id
+
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the /start command."""
@@ -293,9 +299,9 @@ async def show_score(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         
         for position, name in game["player_names"].items():
             if position in ["top", "bottom"]:
-                team_a_players.append(name)
+                team_a_players.append(f"{name} ({position.capitalize()})")
             else:
-                team_b_players.append(name)
+                team_b_players.append(f"{name} ({position.capitalize()})")
         
         team_a_status = "🚫 LOST" if team_a_score >= 101 else "🎮 Playing"
         team_b_status = "🚫 LOST" if team_b_score >= 101 else "🎮 Playing"
@@ -334,6 +340,9 @@ async def end_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     
     # End the game
     game_state_manager.delete_game(chat_id)
+    
+    # Clear all message tracking
+    clear_player_message_tracking()
     
     await update.effective_message.reply_text(
         "🏁 The game has been ended."
@@ -388,6 +397,14 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.effective_message.reply_text(stats_text)
 
 
+def clear_player_message_tracking() -> None:
+    """Clear all tracked message IDs for a fresh game."""
+    player_board_messages.clear()
+    player_status_messages.clear()
+    player_hand_messages.clear()
+    last_board_messages.clear()
+
+
 async def setup_game(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     """Set up the game after all players have joined."""
     game = game_state_manager.get_game(chat_id)
@@ -429,6 +446,9 @@ async def setup_game(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id
     
     await context.bot.send_message(chat_id, team_message)
     
+    # Clear any previous message tracking
+    clear_player_message_tracking()
+    
     # Send private messages to human players with their hand
     for player in game["all_players"]:
         if not player.is_ai:
@@ -451,12 +471,13 @@ async def setup_game(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id
             try:
                 # First send an image of the hand
                 hand_img = create_hand_image(hand, None, game["card_style"])
-                await context.bot.send_photo(
+                msg = await context.bot.send_photo(
                     player_id,
                     photo=hand_img,
                     caption=hand_message,
                     reply_markup=keyboard
                 )
+                player_hand_messages[player_id] = msg.message_id
             except Exception as e:
                 # Handle case where player hasn't started chat with bot
                 logger.error(f"Could not send private message to player {player_id}: {e}")
@@ -518,27 +539,21 @@ async def handle_ai_gifting(context: ContextTypes.DEFAULT_TYPE, chat_id: int) ->
 
 async def process_all_gifts(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> bool:
     """Process all gifts and move to the playing phase."""
-    # Get the game state
     game = game_state_manager.get_game(chat_id)
     if not game:
         return False
     
-    # Call the main implementation in game_state_manager
+    # Process the gifts
     success = game_state_manager.process_all_gifts(chat_id)
-    
     if not success:
         return False
     
-    # Continue with post-processing and notification
+    # Get updated game state
     game = game_state_manager.get_game(chat_id)
     
     # Get game type name
     game_type = game["game_type"]
     game_name = GAME_TYPES[game_type]["name"]
-    
-    # Debug card counts before and after gifting
-    for player_id, hand in game["player_hands"].items():
-        logger.debug(f"Player {player_id} has {len(hand)} cards after gift processing")
     
     # Get current player
     current_position = ["top", "left", "bottom", "right"][game["current_player_index"]]
@@ -561,34 +576,50 @@ async def process_all_gifts(context: ContextTypes.DEFAULT_TYPE, chat_id: int) ->
             hand = player.get_hand()
             position = player.get_position()
             
-            # Ensure hand count is exactly 13
-            if len(hand) != 13:
-                logger.error(f"Player {player_id} has {len(hand)} cards when they should have 13")
-            
             # Determine if it's this player's turn
             is_current_player = player_id == current_player_id
             
             hand_message = (
                 f"🎮 Cards have been gifted! You are the {position.capitalize()} player in Team {get_team(position)}.\n\n"
-                f"You have {len(hand)} cards.\n\n"
+                f"You have {len(hand)} cards."
             )
             
             if is_current_player:
-                hand_message += "🎯 It's your turn to play a card!"
+                hand_message += "\n\n🎯 It's your turn to play a card!"
                 keyboard = make_hand_keyboard(hand, "playing")
             else:
-                hand_message += "Waiting for other players to play..."
+                hand_message += "\n\nWaiting for other players to play..."
                 keyboard = None
             
             try:
-                # Send hand image
+                # Update or send a new hand message
                 hand_img = create_hand_image(hand, None, game["card_style"])
-                await context.bot.send_photo(
-                    player_id,
-                    photo=hand_img,
-                    caption=hand_message,
-                    reply_markup=keyboard
-                )
+                if player_id in player_hand_messages:
+                    try:
+                        await retry_on_rate_limit(
+                            context.bot.edit_message_media,
+                            chat_id=player_id,
+                            message_id=player_hand_messages[player_id],
+                            media=InputMediaPhoto(hand_img, caption=hand_message),
+                            reply_markup=keyboard
+                        )
+                    except Exception as e:
+                        logger.error(f"Could not update hand message: {e}")
+                        msg = await context.bot.send_photo(
+                            player_id,
+                            photo=hand_img,
+                            caption=hand_message,
+                            reply_markup=keyboard
+                        )
+                        player_hand_messages[player_id] = msg.message_id
+                else:
+                    msg = await context.bot.send_photo(
+                        player_id,
+                        photo=hand_img,
+                        caption=hand_message,
+                        reply_markup=keyboard
+                    )
+                    player_hand_messages[player_id] = msg.message_id
             except Exception as e:
                 logger.error(f"Could not send updated hand to player {player_id}: {e}")
     
@@ -600,10 +631,13 @@ async def process_all_gifts(context: ContextTypes.DEFAULT_TYPE, chat_id: int) ->
     
     return True
 
+
 async def handle_ai_play(context: ContextTypes.DEFAULT_TYPE, chat_id: int, ai_player: AIPlayer) -> None:
-    """Handle a card play by an AI player with reduced verbosity."""
+    """Handle a card play by an AI player.
+    No announcements are made in the group chat for individual plays.
+    Only the game board is updated.
+    """
     game = game_state_manager.get_game(chat_id)
-    
     if not game or game["game_phase"] != "playing":
         return
     
@@ -613,11 +647,10 @@ async def handle_ai_play(context: ContextTypes.DEFAULT_TYPE, chat_id: int, ai_pl
     
     # Check if it's this AI's turn
     current_position = ["top", "left", "bottom", "right"][game["current_player_index"]]
-    
     if position != current_position:
         return
     
-    # Add "thinking time" simulation for AI - more realistic and helps with rate limits
+    # Add "thinking time" simulation for AI
     thinking_time = random.uniform(1.5, 3.5)  # Random time between 1.5-3.5 seconds
     await asyncio.sleep(thinking_time)
     
@@ -625,7 +658,6 @@ async def handle_ai_play(context: ContextTypes.DEFAULT_TYPE, chat_id: int, ai_pl
     hand = ai_player.get_hand()
     is_first_player = len(game["trick_pile"]) == 0
     lead_suit = game["lead_suit"]
-    
     valid_cards = ai_player.get_valid_cards(lead_suit, is_first_player)
     
     # AI chooses a card to play
@@ -636,14 +668,14 @@ async def handle_ai_play(context: ContextTypes.DEFAULT_TYPE, chat_id: int, ai_pl
         success = game_state_manager.process_card_play(chat_id, ai_id, played_card)
         
         if success:
-            # Silently update the trick board without announcing each card
+            # Update the trick board in all private chats
             await show_trick_board(context, chat_id)
             
             # Check if the trick is complete
             winner_id = game_state_manager.handle_trick_completion(chat_id)
             
             if winner_id is not None:
-                # Calculate trick points - do this here to ensure consistency
+                # Calculate trick points
                 trick_points = sum(card_value(card) for card in game["trick_pile"])
                 await handle_trick_winner(context, chat_id, winner_id, trick_points)
             else:
@@ -655,26 +687,25 @@ async def handle_ai_play(context: ContextTypes.DEFAULT_TYPE, chat_id: int, ai_pl
                     next_player = next((p for p in game["all_players"] if p.get_id() == next_player_id), None)
                     
                     if next_player and next_player.is_ai:
-                        # No extra delay needed here as we already add delay at the start of handle_ai_play
                         await handle_ai_play(context, chat_id, next_player)
                     else:
                         # Notify the human player it's their turn
                         await notify_next_player(context, chat_id)
 
 
-last_board_messages = {}  # chat_id -> message_id
-
 async def show_trick_board(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
-    """Show (or edit) the current trick board image in the group chat with better rate limit handling."""
+    """Show the current trick board image in private chats and the group chat.
+    Updates existing messages when possible to avoid spam.
+    """
     game = game_state_manager.get_game(chat_id)
-    if not game or game["game_phase"] != "playing" or not game["show_board_in_group"]:
+    if not game or game["game_phase"] != "playing":
         return
 
     trick_pile = game["trick_pile"]
     if not trick_pile:
         return
 
-    # 1) Generate the image once, grab its raw bytes so we can reuse it
+    # Generate the board image once
     raw_png = create_trick_board_image(
         trick_pile,
         game["player_names"],
@@ -682,54 +713,89 @@ async def show_trick_board(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> 
         GAME_TYPES[game["game_type"]]["name"]
     ).getvalue()
 
-    # 2) Try to EDIT the existing message if we have one
-    if chat_id in last_board_messages:
+    # First, update the board in the group chat if show_board_in_group is enabled
+    if game["show_board_in_group"]:
         try:
-            bio = BytesIO(raw_png)
-            await retry_on_rate_limit(
-                context.bot.edit_message_media,
-                chat_id=chat_id,
-                message_id=last_board_messages[chat_id],
-                media=InputMediaPhoto(bio, caption="Current Trick Board")
-            )
-            return
-        except RetryAfter as e:
-            logger.warning(f"Flood control hit, retry after {e.retry_after}s")
-            # Add a sleeping period before continuing
-            await asyncio.sleep(e.retry_after + 0.5)  # Add a bit extra time
-            try:
-                # Try again after waiting
+            # Update existing message if possible
+            if chat_id in last_board_messages:
                 bio = BytesIO(raw_png)
-                await context.bot.edit_message_media(
-                    chat_id=chat_id,
-                    message_id=last_board_messages[chat_id],
-                    media=InputMediaPhoto(bio, caption="Current Trick Board")
+                try:
+                    await retry_on_rate_limit(
+                        context.bot.edit_message_media,
+                        chat_id=chat_id,
+                        message_id=last_board_messages[chat_id],
+                        media=InputMediaPhoto(bio, caption="Current Trick Board")
+                    )
+                except Exception as e:
+                    # If updating fails, send a new message
+                    logger.error(f"Could not update group board: {e}")
+                    bio = BytesIO(raw_png)
+                    msg = await retry_on_rate_limit(
+                        context.bot.send_photo,
+                        chat_id,
+                        photo=bio,
+                        caption="Current Trick Board"
+                    )
+                    last_board_messages[chat_id] = msg.message_id
+            else:
+                # Send new board if no existing message
+                bio = BytesIO(raw_png)
+                msg = await retry_on_rate_limit(
+                    context.bot.send_photo,
+                    chat_id,
+                    photo=bio,
+                    caption="Current Trick Board"
                 )
-                return
-            except Exception as e2:
-                logger.error(f"Second attempt to update board failed: {e2}")
+                last_board_messages[chat_id] = msg.message_id
         except Exception as e:
-            logger.error(f"Could not update trick board: {e}")
+            logger.error(f"Failed to update group board: {e}")
 
-    # 3) Fallback: send a brand new photo
-    try:
-        bio = BytesIO(raw_png)
-        msg = await retry_on_rate_limit(
-            context.bot.send_photo,
-            chat_id,
-            photo=bio,
-            caption="Current Trick Board"
-        )
-        # remember this message for next time
-        last_board_messages[chat_id] = msg.message_id
-    except Exception as e:
-        logger.error(f"Failed to send trick board: {e}")
+    # Then send the board to all human players in private chats
+    for player in game["all_players"]:
+        if not player.is_ai:
+            player_id = player.get_id()
+            try:
+                # Update existing message if possible
+                if player_id in player_board_messages:
+                    bio = BytesIO(raw_png)
+                    try:
+                        await retry_on_rate_limit(
+                            context.bot.edit_message_media,
+                            chat_id=player_id,
+                            message_id=player_board_messages[player_id],
+                            media=InputMediaPhoto(bio, caption="Current Game Board")
+                        )
+                    except Exception as e:
+                        # If updating fails, send a new message
+                        logger.error(f"Could not update player board: {e}")
+                        bio = BytesIO(raw_png)
+                        msg = await retry_on_rate_limit(
+                            context.bot.send_photo,
+                            player_id,
+                            photo=bio,
+                            caption="Current Game Board"
+                        )
+                        player_board_messages[player_id] = msg.message_id
+                else:
+                    # Send new board if no existing message
+                    bio = BytesIO(raw_png)
+                    msg = await retry_on_rate_limit(
+                        context.bot.send_photo,
+                        player_id,
+                        photo=bio,
+                        caption="Current Game Board"
+                    )
+                    player_board_messages[player_id] = msg.message_id
+            except Exception as e:
+                logger.error(f"Failed to send board to player {player_id}: {e}")
 
 
 async def handle_trick_winner(context: ContextTypes.DEFAULT_TYPE, chat_id: int, winner_id: int, trick_points: int) -> None:
-    """Handle the winner of a trick with consistent scoring."""
+    """Handle the winner of a trick with consistent scoring.
+    Only announces point-scoring tricks in the group chat.
+    Updates the status message for each player rather than sending new ones.
+    """
     game = game_state_manager.get_game(chat_id)
-
     if not game:
         return
 
@@ -742,19 +808,37 @@ async def handle_trick_winner(context: ContextTypes.DEFAULT_TYPE, chat_id: int, 
     winner_name = winner_player.get_name()
     winner_team = "A" if winner_position in ["top", "bottom"] else "B"
     
-    # Only announce non-zero point tricks
+    # Only announce point-scoring tricks in the group chat
     if trick_points > 0:
-        # Send a single consolidated message
         await context.bot.send_message(
             chat_id,
-            f"🎮 {winner_name} ({winner_position}) won the trick for Team {winner_team} with {trick_points} point{'s' if trick_points != 1 else ''}."
+            f"🎮 {winner_name} ({winner_position}) won a trick with {trick_points} point{'s' if trick_points != 1 else ''} for Team {winner_team}."
         )
-    else:
-        # For zero-point tricks, send a more concise message
-        await context.bot.send_message(
-            chat_id,
-            f"🎮 {winner_name} ({winner_position}) won the trick for Team {winner_team}."
-        )
+    
+    # Update status message for all human players
+    status_message = f"🎮 {winner_name} ({winner_position}) won the trick for Team {winner_team}" + (f" with {trick_points} point{'s' if trick_points != 1 else ''}." if trick_points > 0 else ".")
+    
+    for player in game["all_players"]:
+        if not player.is_ai:
+            player_id = player.get_id()
+            try:
+                # Update existing status message or send a new one
+                if player_id in player_status_messages:
+                    try:
+                        await context.bot.edit_message_text(
+                            text=status_message,
+                            chat_id=player_id,
+                            message_id=player_status_messages[player_id]
+                        )
+                    except Exception as e:
+                        logger.error(f"Could not update status message: {e}")
+                        msg = await context.bot.send_message(player_id, status_message)
+                        player_status_messages[player_id] = msg.message_id
+                else:
+                    msg = await context.bot.send_message(player_id, status_message)
+                    player_status_messages[player_id] = msg.message_id
+            except Exception as e:
+                logger.error(f"Could not send trick result to player {player_id}: {e}")
     
     # Update stats for human players
     if winner_id > 0:  # Human player
@@ -782,8 +866,9 @@ async def handle_trick_winner(context: ContextTypes.DEFAULT_TYPE, chat_id: int, 
                 # Notify the human player it's their turn
                 await notify_next_player(context, chat_id)
 
+
 async def notify_next_player(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
-    """Notify the next player it's their turn."""
+    """Notify the next player it's their turn in private chat only, updating existing messages."""
     game = game_state_manager.get_game(chat_id)
     
     if not game or game["game_phase"] != "playing":
@@ -804,50 +889,65 @@ async def notify_next_player(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -
     
     hand = next_player.get_hand()
     
-    # Create and send a board image to the next player
-    trick_order = ["top", "left", "bottom", "right"]
-    current_trick = []
-    
-    for pos in trick_order:
-        pos_idx = trick_order.index(pos)
-        cards_played = len(game["trick_pile"])
-        
-        # Add cards that have been played in the correct positions
-        if pos_idx < cards_played:
-            current_trick.append(game["trick_pile"][pos_idx])
-        else:
-            current_trick.append(None)
-    
-    # Create board image
-    card_style = game["card_style"]
-    game_name = GAME_TYPES[game["game_type"]]["name"]
-    img_bytes = create_trick_board_image(current_trick, game["player_names"], card_style, game_name)
-    
-    # Create hand keyboard
+    # Create keyboard for card selection
     keyboard = make_hand_keyboard(hand, "playing")
     
     try:
-        # First send the trick board image
-        await context.bot.send_photo(
-            next_player_id, 
-            photo=img_bytes, 
-            caption=f"🎯 It's your turn to play a card!"
-        )
+        # Update status message to indicate it's the player's turn
+        status_message = "🎯 It's your turn to play a card!"
+        if next_player_id in player_status_messages:
+            try:
+                await context.bot.edit_message_text(
+                    text=status_message,
+                    chat_id=next_player_id,
+                    message_id=player_status_messages[next_player_id]
+                )
+            except Exception as e:
+                logger.error(f"Could not update status message: {e}")
+                msg = await context.bot.send_message(next_player_id, status_message)
+                player_status_messages[next_player_id] = msg.message_id
+        else:
+            msg = await context.bot.send_message(next_player_id, status_message)
+            player_status_messages[next_player_id] = msg.message_id
         
-        # Then send the hand with keyboard
-        hand_img = create_hand_image(hand, None, card_style)
-        await context.bot.send_photo(
-            next_player_id,
-            photo=hand_img,
-            caption=f"Select a card to play:",
-            reply_markup=keyboard
-        )
+        # Update or send the hand with keyboard
+        hand_img = create_hand_image(hand, None, game["card_style"])
+        caption = "Select a card to play:"
+        
+        if next_player_id in player_hand_messages:
+            try:
+                await retry_on_rate_limit(
+                    context.bot.edit_message_media,
+                    chat_id=next_player_id,
+                    message_id=player_hand_messages[next_player_id],
+                    media=InputMediaPhoto(hand_img, caption=caption),
+                    reply_markup=keyboard
+                )
+            except Exception as e:
+                logger.error(f"Could not update hand message: {e}")
+                msg = await context.bot.send_photo(
+                    next_player_id,
+                    photo=hand_img,
+                    caption=caption,
+                    reply_markup=keyboard
+                )
+                player_hand_messages[next_player_id] = msg.message_id
+        else:
+            msg = await context.bot.send_photo(
+                next_player_id,
+                photo=hand_img,
+                caption=caption,
+                reply_markup=keyboard
+            )
+            player_hand_messages[next_player_id] = msg.message_id
     except Exception as e:
         logger.error(f"Could not notify next player {next_player_id}: {e}")
 
 
 async def handle_round_end(context: ContextTypes.DEFAULT_TYPE, chat_id: int, results: Dict[str, Any]) -> None:
-    """Handle the end of a round."""
+    """Handle the end of a round.
+    Sends round end message to both group chat and private chats.
+    """
     game = game_state_manager.get_game(chat_id)
     
     if not game:
@@ -908,6 +1008,17 @@ async def handle_round_end(context: ContextTypes.DEFAULT_TYPE, chat_id: int, res
     # Send round end message to the group
     await context.bot.send_message(chat_id, round_message)
     
+    # Also send to all human players
+    for player in game["all_players"]:
+        if not player.is_ai:
+            try:
+                await context.bot.send_message(player.get_id(), round_message)
+            except Exception as e:
+                logger.error(f"Could not send round end message to player {player.get_id()}: {e}")
+    
+    # Clear all message tracking for new round
+    clear_player_message_tracking()
+    
     # If game continues, start new round
     if not game_over:
         game = game_state_manager.get_game(chat_id)
@@ -941,12 +1052,13 @@ async def handle_round_end(context: ContextTypes.DEFAULT_TYPE, chat_id: int, res
                     try:
                         # Send hand image
                         hand_img = create_hand_image(hand, None, game["card_style"])
-                        await context.bot.send_photo(
+                        msg = await context.bot.send_photo(
                             player_id,
                             photo=hand_img,
                             caption=hand_message,
                             reply_markup=keyboard
                         )
+                        player_hand_messages[player_id] = msg.message_id
                     except Exception as e:
                         logger.error(f"Could not send new round message to player {player_id}: {e}")
             
@@ -973,3 +1085,101 @@ async def cleanup_games_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             
             game_state_manager.delete_game(chat_id)
             logger.info(f"Cleaned up inactive game in chat {chat_id}")
+            
+            # Clear all message tracking
+            clear_player_message_tracking()
+
+def create_fresh_image_buffer(image_generator_func, *args):
+    """Safely create a BytesIO buffer with image data.
+    
+    Args:
+        image_generator_func: Function that generates the image
+        *args: Arguments to pass to the image generator function
+        
+    Returns:
+        A fresh BytesIO buffer containing the image or None if generation fails
+    """
+    try:
+        # Get the image bytes
+        buffer = image_generator_func(*args)
+        
+        # Ensure the buffer is non-empty and positioned at the start
+        if buffer and buffer.getbuffer().nbytes > 0:
+            buffer.seek(0)
+            return buffer
+        else:
+            logger.error(f"Generated empty image buffer")
+            return None
+    except Exception as e:
+        logger.error(f"Failed to generate image: {e}")
+        return None
+
+async def safe_send_photo(context, chat_id, photo_buffer, caption=None, reply_markup=None):
+    """Safely send a photo message, handling empty buffer cases.
+    
+    Args:
+        context: Bot context
+        chat_id: Target chat ID
+        photo_buffer: BytesIO buffer with image data
+        caption: Optional caption
+        reply_markup: Optional reply markup
+        
+    Returns:
+        Message object if successful, None otherwise
+    """
+    if photo_buffer and photo_buffer.getbuffer().nbytes > 0:
+        try:
+            return await context.bot.send_photo(
+                chat_id,
+                photo=photo_buffer,
+                caption=caption,
+                reply_markup=reply_markup
+            )
+        except Exception as e:
+            logger.error(f"Error sending photo: {e}")
+            # Fallback to text-only message if image sending fails
+            try:
+                return await context.bot.send_message(
+                    chat_id,
+                    text=(caption or "Game update") + "\n\n[Image could not be displayed]",
+                    reply_markup=reply_markup
+                )
+            except Exception as e2:
+                logger.error(f"Error sending fallback message: {e2}")
+                return None
+    else:
+        # Send text-only message if buffer is empty
+        try:
+            return await context.bot.send_message(
+                chat_id,
+                text=(caption or "Game update") + "\n\n[Image could not be displayed]",
+                reply_markup=reply_markup
+            )
+        except Exception as e:
+            logger.error(f"Error sending text fallback: {e}")
+            return None
+
+async def safe_edit_message_media(context, chat_id, message_id, new_media, reply_markup=None):
+    """Safely edit a message's media, with fallback options.
+    
+    Args:
+        context: Bot context
+        chat_id: Target chat ID
+        message_id: Message ID to edit
+        new_media: InputMediaPhoto object
+        reply_markup: Optional reply markup
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        await context.bot.edit_message_media(
+            chat_id=chat_id,
+            message_id=message_id,
+            media=new_media,
+            reply_markup=reply_markup
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Error editing message media: {e}")
+        return False
