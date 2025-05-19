@@ -24,6 +24,8 @@ from utils.telegram_utils import (
 )
 from utils.images import create_trick_board_image, create_hand_image
 from utils.cards import get_neighbor_position, get_card_emoji, get_team
+from telegram import InputMediaPhoto
+import asyncio
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -643,8 +645,12 @@ async def handle_ai_play(context: ContextTypes.DEFAULT_TYPE, chat_id: int, ai_pl
                         await notify_next_player(context, chat_id)
 
 
+last_board_messages = {}  # chat_id -> message_id
+
 async def show_trick_board(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     """Show the current trick board in the group chat."""
+    global last_board_messages
+    
     game = game_state_manager.get_game(chat_id)
     
     if not game or game["game_phase"] != "playing" or not game["show_board_in_group"]:
@@ -675,11 +681,30 @@ async def show_trick_board(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> 
     game_name = GAME_TYPES[game["game_type"]]["name"]
     img_bytes = create_trick_board_image(current_trick, game["player_names"], card_style, game_name)
     
-    await context.bot.send_photo(
+    # Check if we've already sent a board message to this chat
+    if chat_id in last_board_messages:
+        try:
+            # Try to edit the existing message
+            message_id = last_board_messages[chat_id]
+            await context.bot.edit_message_media(
+                chat_id=chat_id,
+                message_id=message_id,
+                media=InputMediaPhoto(img_bytes, caption="Current Trick Board")
+            )
+            return
+        except Exception as e:
+            logger.error(f"Could not update board: {e}")
+            # Fall through to sending a new message
+    
+    # If we don't have a message ID or editing failed, send a new message
+    message = await context.bot.send_photo(
         chat_id, 
         photo=img_bytes, 
         caption="Current Trick Board"
     )
+    
+    # Save this message ID for future updates
+    last_board_messages[chat_id] = message.message_id
 
 
 async def handle_trick_winner(context: ContextTypes.DEFAULT_TYPE, chat_id: int, winner_id: int) -> None:

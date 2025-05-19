@@ -26,13 +26,14 @@ from handlers.command_handlers import (
     notify_next_player,
     handle_ai_play
 )
+from utils.cards import get_neighbor_position, get_card_emoji
+from telegram import InputMediaPhoto
 
 # Configure logger
 logger = logging.getLogger(__name__)
 
 # Type alias
 CardType = Tuple[str, str]  # (rank, suit)
-
 
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle callback queries from inline keyboards."""
@@ -60,7 +61,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         # This is a dummy callback for the disabled buttons
         await query.answer("Select exactly 3 cards to gift.")
     else:
-        await query.answer("Unknown action.")
+        await query.answer(f"Unknown action: {data}")
 
 
 async def handle_game_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -369,10 +370,12 @@ async def handle_gift_selection(update: Update, context: ContextTypes.DEFAULT_TY
         hand_img = create_hand_image(hand, gifted_cards, game["card_style"])
         
         try:
-            # Edit the existing message with the updated hand image
             await query.edit_message_media(
-                media={"type": "photo", "media": hand_img, "caption": f"Please select 3 cards to gift to {recipient_name}."},
-                reply_markup=keyboard
+            media=InputMediaPhoto(
+                media=hand_img,
+                caption=f"Please select 3 cards to gift to {recipient_name}."
+            ),
+            reply_markup=keyboard
             )
         except Exception as e:
             logger.error(f"Could not update hand image: {e}")
@@ -401,10 +404,18 @@ async def handle_gift_selection(update: Update, context: ContextTypes.DEFAULT_TY
         gift_to_position = get_neighbor_position(position)
         recipient_name = game["player_names"].get(gift_to_position, f"the {gift_to_position.capitalize()} player")
         
-        # Show confirmation message
+        # Show confirmation message - SEND NEW MESSAGE instead of editing
         gifted_cards_text = ", ".join(get_card_emoji((rank, suit)) for rank, suit in gifted_cards)
         
-        await query.edit_message_text(
+        # Delete the previous message if possible
+        try:
+            await query.message.delete()
+        except:
+            pass  # Ignore if we can't delete
+        
+        # Send a new confirmation message
+        await context.bot.send_message(
+            user_id,
             f"✅ You've selected these 3 cards to gift to {recipient_name}:\n"
             f"{gifted_cards_text}\n\n"
             f"Waiting for all players to select their cards..."
