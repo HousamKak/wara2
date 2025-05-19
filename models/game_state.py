@@ -341,6 +341,7 @@ class GameStateManager:
             True if all gifts were processed, False otherwise
         """
         game = self.get_game(chat_id)
+        
         if not game:
             return False
         
@@ -349,20 +350,37 @@ class GameStateManager:
         if not all_selected:
             return False
         
+        # Debug card counts before gifting
+        for player_id, hand in game["player_hands"].items():
+            logger.debug(f"Player {player_id} has {len(hand)} cards before gifting")
+        
         # Transfer gifted cards
         positions = ["top", "left", "bottom", "right"]
         
+        # First pass: Remove all gifted cards from givers' hands
         for position in positions:
             giver_id = game["player_positions"][position]
-            receiver_position = get_neighbor_position(position)
-            receiver_id = game["player_positions"][receiver_position]
-            
-            gifted_cards = game["gifted_cards"][giver_id]
+            gifted_cards = game["gifted_cards"][giver_id].copy()
             
             # Remove cards from giver's hand
             for card in gifted_cards:
                 if card in game["player_hands"][giver_id]:
                     game["player_hands"][giver_id].remove(card)
+                else:
+                    logger.error(f"Card {card} not found in player {giver_id}'s hand")
+            
+            # Update player object
+            for player in game["all_players"]:
+                if player.get_id() == giver_id:
+                    player.remove_from_hand(gifted_cards)
+        
+        # Second pass: Add gifted cards to receivers' hands
+        for position in positions:
+            giver_id = game["player_positions"][position]
+            receiver_position = get_neighbor_position(position)
+            receiver_id = game["player_positions"][receiver_position]
+            
+            gifted_cards = game["gifted_cards"][giver_id].copy()
             
             # Add cards to receiver's hand
             game["player_hands"][receiver_id].extend(gifted_cards)
@@ -370,14 +388,20 @@ class GameStateManager:
             # Sort receiver's hand
             game["player_hands"][receiver_id].sort(key=card_sort_key)
             
-            # Update player objects
+            # Update player object
             for player in game["all_players"]:
-                if player.get_id() == giver_id:
-                    player.remove_from_hand(gifted_cards)
-                elif player.get_id() == receiver_id:
+                if player.get_id() == receiver_id:
                     player.add_to_hand(gifted_cards)
                     # Sort player's hand
                     player.hand.sort(key=card_sort_key)
+        
+        # Debug card counts after gifting
+        for player_id, hand in game["player_hands"].items():
+            logger.debug(f"Player {player_id} has {len(hand)} cards after gifting")
+            
+            # Verify each player has exactly 13 cards
+            if len(hand) != 13:
+                logger.error(f"Player {player_id} has {len(hand)} cards instead of 13 after gifting!")
         
         # Update game phase to playing
         game["game_phase"] = "playing"

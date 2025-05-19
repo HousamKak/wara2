@@ -512,18 +512,22 @@ async def handle_ai_gifting(context: ContextTypes.DEFAULT_TYPE, chat_id: int) ->
         await process_all_gifts(context, chat_id)
 
 
-async def process_all_gifts(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+async def process_all_gifts(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> bool:
     """Process all gifts and move to the playing phase."""
     success = game_state_manager.process_all_gifts(chat_id)
     
     if not success:
-        return
+        return False
     
     game = game_state_manager.get_game(chat_id)
     
     # Get game type name
     game_type = game["game_type"]
     game_name = GAME_TYPES[game_type]["name"]
+    
+    # Debug card counts before and after gifting
+    for player_id, hand in game["player_hands"].items():
+        logger.debug(f"Player {player_id} has {len(hand)} cards after gift processing")
     
     # Get current player
     current_position = ["top", "left", "bottom", "right"][game["current_player_index"]]
@@ -546,11 +550,16 @@ async def process_all_gifts(context: ContextTypes.DEFAULT_TYPE, chat_id: int) ->
             hand = player.get_hand()
             position = player.get_position()
             
+            # Ensure hand count is exactly 13
+            if len(hand) != 13:
+                logger.error(f"Player {player_id} has {len(hand)} cards when they should have 13")
+            
             # Determine if it's this player's turn
             is_current_player = player_id == current_player_id
             
             hand_message = (
                 f"🎮 Cards have been gifted! You are the {position.capitalize()} player in Team {get_team(position)}.\n\n"
+                f"You have {len(hand)} cards.\n\n"
             )
             
             if is_current_player:
@@ -577,6 +586,8 @@ async def process_all_gifts(context: ContextTypes.DEFAULT_TYPE, chat_id: int) ->
     
     if current_player and current_player.is_ai:
         await handle_ai_play(context, chat_id, current_player)
+    
+    return True
 
 
 async def handle_ai_play(context: ContextTypes.DEFAULT_TYPE, chat_id: int, ai_player: AIPlayer) -> None:
@@ -710,43 +721,43 @@ async def show_trick_board(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> 
 async def handle_trick_winner(context: ContextTypes.DEFAULT_TYPE, chat_id: int, winner_id: int) -> None:
     """Handle the winner of a trick."""
     game = game_state_manager.get_game(chat_id)
-
+    
     if not game:
         return
-
+    
     winner_player = next((p for p in game["all_players"] if p.get_id() == winner_id), None)
-
+    
     if not winner_player:
         return
-
+    
     winner_position = winner_player.get_position()
     winner_name = winner_player.get_name()
-
+    
     # Get a copy of the trick pile before it's reset
     trick_pile = game["trick_pile"].copy()
-
-    # Debug each card's value
+    
+    # Debug each card in the trick
     for card in trick_pile:
         rank, suit = card
         point_value = card_value(card)
         logger.debug(f"Card in trick: {rank} of {suit}, value: {point_value}")
-
+    
     # Calculate points for the trick
     trick_points = sum(card_value(card) for card in trick_pile)
     logger.debug(f"Total trick points: {trick_points}")
-
+    
     # Use the winning card for the message
     winning_card = None
     from utils.cards import find_winner
-
+    
     # Only try to find the winning card if trick_pile is not empty
     if trick_pile:
         winner_idx = find_winner(trick_pile, game["lead_suit"])
         if 0 <= winner_idx < len(trick_pile):
             winning_card = trick_pile[winner_idx]
-
+    
     winning_card_emoji = get_card_emoji(winning_card) if winning_card else "a card"
-
+    
     # Send trick completion message to the group
     try:
         await context.bot.send_message(
@@ -755,19 +766,20 @@ async def handle_trick_winner(context: ContextTypes.DEFAULT_TYPE, chat_id: int, 
             f"Points in this trick: {trick_points}"
         )
     except Exception as e:
+        # Fallback without emoji if there's an encoding error
         logger.error(f"Error sending winner message: {e}")
         await context.bot.send_message(
             chat_id, 
             f"{winner_name} won the trick!\nPoints in this trick: {trick_points}"
         )
-
+    
     # Update stats for human players
     if winner_id > 0:  # Human player
         stats_manager.update_stat(winner_id, "tricks_won")
-
+    
     # Check if the round is over
     round_results = game_state_manager.handle_round_end(chat_id)
-
+    
     if round_results:
         await handle_round_end(context, chat_id, round_results)
     else:
@@ -777,7 +789,7 @@ async def handle_trick_winner(context: ContextTypes.DEFAULT_TYPE, chat_id: int, 
             next_position = ["top", "left", "bottom", "right"][game["current_player_index"]]
             next_player_id = game["player_positions"][next_position]
             next_player = next((p for p in game["all_players"] if p.get_id() == next_player_id), None)
-
+            
             if next_player and next_player.is_ai:
                 # Slight delay for more natural gameplay
                 await asyncio.sleep(2)
