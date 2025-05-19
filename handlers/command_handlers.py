@@ -722,18 +722,24 @@ async def handle_trick_winner(context: ContextTypes.DEFAULT_TYPE, chat_id: int, 
     winner_position = winner_player.get_position()
     winner_name = winner_player.get_name()
     
+    # Get a copy of the trick pile before it's reset
+    trick_pile = game["trick_pile"].copy()
+    
     # Calculate points for the trick
     from utils.cards import card_value
-    trick_pile = game["trick_pile"].copy()
     trick_points = sum(card_value(card) for card in trick_pile)
     
     # Use the winning card for the message
-    winning_card = trick_pile[0]  # Placeholder
+    winning_card = None
     from utils.cards import find_winner
-    winner_idx = find_winner(trick_pile, game["lead_suit"])
-    if 0 <= winner_idx < len(trick_pile):
-        winning_card = trick_pile[winner_idx]
-    winning_card_emoji = get_card_emoji(winning_card)
+    
+    # Only try to find the winning card if trick_pile is not empty
+    if trick_pile:
+        winner_idx = find_winner(trick_pile, game["lead_suit"])
+        if 0 <= winner_idx < len(trick_pile):
+            winning_card = trick_pile[winner_idx]
+    
+    winning_card_emoji = get_card_emoji(winning_card) if winning_card else "a card"
     
     # Send trick completion message to the group
     await context.bot.send_message(
@@ -766,7 +772,6 @@ async def handle_trick_winner(context: ContextTypes.DEFAULT_TYPE, chat_id: int, 
             else:
                 # Notify the human player it's their turn
                 await notify_next_player(context, chat_id)
-
 
 async def notify_next_player(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     """Notify the next player it's their turn."""

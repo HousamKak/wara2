@@ -28,6 +28,7 @@ from handlers.command_handlers import (
 )
 from utils.cards import get_neighbor_position, get_card_emoji
 from telegram import InputMediaPhoto
+import asyncio
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -436,6 +437,8 @@ async def handle_card_play(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     
     await query.answer()
     
+    logger.info(f"Card play attempt by user {user_id}: {data}")
+    
     # Find which game this player is in
     game = None
     chat_id = None
@@ -447,34 +450,55 @@ async def handle_card_play(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             break
     
     if not game:
-        await query.edit_message_text("⚠️ You're not in an active game in the playing phase.")
+        logger.warning(f"No active game found for user {user_id}")
+        try:
+            await context.bot.send_message(user_id, "⚠️ You're not in an active game in the playing phase.")
+        except:
+            pass
         return
+    
+    logger.info(f"Game found for user {user_id}. Phase: {game['game_phase']}")
     
     # Check if it's this player's turn
     current_position = ["top", "left", "bottom", "right"][game["current_player_index"]]
     current_player_id = game["player_positions"].get(current_position)
     
+    logger.info(f"Current position: {current_position}, Current player ID: {current_player_id}, User ID: {user_id}")
+    
     if user_id != current_player_id:
+        logger.warning(f"Not user's turn. Current player: {current_player_id}, User: {user_id}")
         await query.answer("It's not your turn!")
         return
+    
+    logger.info(f"It is user {user_id}'s turn")
     
     if data.startswith("play_"):
         # Extract card info
         _, rank, suit = data.split("_", 2)
         played_card = (rank, suit)
         
+        logger.info(f"User {user_id} attempting to play {rank} of {suit}")
+        
         # Find the player
         player = next((p for p in game["all_players"] if p.get_id() == user_id), None)
         
         if not player:
-            await query.edit_message_text("⚠️ Player not found in game.")
+            logger.warning(f"Player {user_id} not found in game")
+            try:
+                await context.bot.send_message(user_id, "⚠️ Player not found in game.")
+            except:
+                pass
             return
         
         hand = player.get_hand()
         
         # Check if the card is in the player's hand
         if played_card not in hand:
-            await query.edit_message_text("⚠️ Invalid card selection.")
+            logger.warning(f"Card {rank} of {suit} not in player's hand")
+            try:
+                await context.bot.send_message(user_id, "⚠️ Card not in your hand.")
+            except:
+                pass
             return
         
         # Check if the play is valid (following suit if required)
@@ -485,6 +509,7 @@ async def handle_card_play(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         valid_cards = player.get_valid_cards(lead_suit, is_first_player)
         
         if played_card not in valid_cards:
+            logger.warning(f"Card {rank} of {suit} is not a valid play")
             await query.answer(f"You must follow the lead suit ({lead_suit})!")
             return
         
@@ -492,6 +517,7 @@ async def handle_card_play(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         success = game_state_manager.process_card_play(chat_id, user_id, played_card)
         
         if not success:
+            logger.error(f"Failed to process card play: {played_card}")
             await query.answer("Error processing card play.")
             return
         
@@ -501,20 +527,36 @@ async def handle_card_play(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         # Get card emoji for message
         card_emoji = get_card_emoji(played_card)
         
-        # Send updated message to the player
-        await query.edit_message_text(
-            f"You played: {card_emoji}\n\n"
-            f"Waiting for other players..."
-        )
+        # Send a new message instead of editing
+        try:
+            # Delete the old message with the keyboard
+            await query.message.delete()
+        except Exception as e:
+            logger.error(f"Could not delete message: {e}")
+        
+        try:
+            await context.bot.send_message(
+                user_id,
+                f"You played: {card_emoji}\n\n"
+                f"Waiting for other players..."
+            )
+        except Exception as e:
+            logger.error(f"Could not send confirmation message: {e}")
         
         # Notify the group about the play
-        await context.bot.send_message(
-            chat_id,
-            f"{player.get_name()} played: {card_emoji}"
-        )
+        try:
+            await context.bot.send_message(
+                chat_id,
+                f"{player.get_name()} played: {card_emoji}"
+            )
+        except Exception as e:
+            logger.error(f"Could not send play notification: {e}")
         
         # Show the trick board in the group chat
-        await show_trick_board(context, chat_id)
+        try:
+            await show_trick_board(context, chat_id)
+        except Exception as e:
+            logger.error(f"Could not update trick board: {e}")
         
         # Check if the trick is complete
         winner_id = game_state_manager.handle_trick_completion(chat_id)
@@ -531,7 +573,6 @@ async def handle_card_play(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 
                 if next_player and next_player.is_ai:
                     # Slight delay for more natural gameplay
-                    import asyncio
                     await asyncio.sleep(2)
                     await handle_ai_play(context, chat_id, next_player)
                 else:
