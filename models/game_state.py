@@ -4,11 +4,12 @@ Game state data structures and management.
 
 import random
 from datetime import datetime
-from typing import Dict, List, Optional, Any, Union, Set, TypedDict
+from typing import Dict, List, Optional, Any, Union, Set, TypedDict, Tuple
 
 from constants import GamePhaseType, CardStyleType
 from models.player import Player, HumanPlayer, AIPlayer
 from utils.cards import deal_cards, card_sort_key, get_neighbor_position
+from ai.li5a_ai import Li5aAIPlayer
 
 # Type alias
 CardType = Tuple[str, str]  # (rank, suit)
@@ -159,7 +160,7 @@ class GameStateManager:
         
         # Add AI player
         game["ai_players"].append(ai_id)
-        ai_player = AIPlayer(ai_id, f"{ai_name} (AI)", difficulty)
+        ai_player = Li5aAIPlayer(ai_id, f"{ai_name} (AI)", difficulty)
         game["all_players"].append(ai_player)
         
         return ai_id

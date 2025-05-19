@@ -15,7 +15,7 @@ def create_deck() -> List[CardType]:
     """Create a standard 52-card deck.
     
     Returns:
-        A list of (rank, suit) tuples representing cards
+        A list of (rank, suit) Tuples representing cards
     """
     deck: List[CardType] = [(rank, suit) for suit in SUITS for rank in RANKS]
     return deck
@@ -25,7 +25,7 @@ def get_card_emoji(card: Optional[CardType]) -> str:
     """Return a string representation of a card.
     
     Args:
-        card: A (rank, suit) tuple or None
+        card: A (rank, suit) Tuple or None
         
     Returns:
         A string like "A♥️" representing the card
@@ -44,7 +44,7 @@ def card_to_filename(card: CardType) -> str:
     """Convert a card to its filename.
     
     Args:
-        card: A (rank, suit) tuple
+        card: A (rank, suit) Tuple
         
     Returns:
         Filename like "ace_of_hearts.png"
@@ -57,7 +57,7 @@ def card_value(card: CardType) -> int:
     """Get the point value of a card in Li5a game.
     
     Args:
-        card: A (rank, suit) tuple
+        card: A (rank, suit) Tuple
         
     Returns:
         Point value according to Li5a game rules
@@ -78,10 +78,10 @@ def card_sort_key(card: CardType) -> Tuple[int, int]:
     """Get a sort key for a card to order hands nicely.
     
     Args:
-        card: A (rank, suit) tuple
+        card: A (rank, suit) Tuple
         
     Returns:
-        A tuple that can be used for sorting
+        A Tuple that can be used for sorting
     """
     rank, suit = card
     suit_order = {"clubs": 0, "diamonds": 1, "spades": 2, "hearts": 3}
