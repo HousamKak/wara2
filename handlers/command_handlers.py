@@ -645,10 +645,12 @@ async def handle_ai_play(context: ContextTypes.DEFAULT_TYPE, chat_id: int, ai_pl
             await show_trick_board(context, chat_id)
             
             # Check if the trick is complete
+            completed_trick = list(game["trick_pile"])
             winner_id = game_state_manager.handle_trick_completion(chat_id)
-            
+
             if winner_id is not None:
-                await handle_trick_winner(context, chat_id, winner_id)
+                trick_points = sum(card_value(c) for c in completed_trick)
+                await handle_trick_winner(context, chat_id, winner_id, trick_points)
             else:
                 # Check if the next player is an AI
                 game = game_state_manager.get_game(chat_id)
