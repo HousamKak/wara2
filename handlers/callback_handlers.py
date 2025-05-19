@@ -29,6 +29,7 @@ from handlers.command_handlers import (
 from utils.cards import get_neighbor_position, get_card_emoji
 from telegram import InputMediaPhoto
 import asyncio
+from utils.retry_helper import retry_on_rate_limit
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -371,19 +372,18 @@ async def handle_gift_selection(update: Update, context: ContextTypes.DEFAULT_TY
         hand_img = create_hand_image(hand, gifted_cards, game["card_style"])
         
         try:
-            await query.edit_message_media(
-            media=InputMediaPhoto(
-                media=hand_img,
-                caption=f"Please select 3 cards to gift to {recipient_name}."
-            ),
-            reply_markup=keyboard
+            await retry_on_rate_limit(query.edit_message_media,
+                media=InputMediaPhoto(
+                    media=hand_img,
+                    caption=f"Please select 3 cards to gift to {recipient_name}."
+                ),
+                reply_markup=keyboard
             )
         except Exception as e:
             logger.error(f"Could not update hand image: {e}")
             # Fall back to text update
-            await query.edit_message_text(
-                f"🎮 You are the {position.capitalize()} player in Team {player.team}.\n\n"
-                f"Please select 3 cards to gift to {recipient_name}.",
+            await retry_on_rate_limit(query.edit_message_text,
+                text=f"Please select 3 cards to gift to {recipient_name}.",
                 reply_markup=keyboard
             )
         
@@ -562,10 +562,19 @@ async def handle_card_play(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             logger.error(f"Could not update trick board: {e}")
         
         # Check if the trick is complete
+        # Capture the trick before clearing it
+        completed_trick = list(game["trick_pile"])  # Snapshot of the trick pile
         winner_id = game_state_manager.handle_trick_completion(chat_id)
-        
+
         if winner_id is not None:
-            await handle_trick_winner(context, chat_id, winner_id)
+            # Score the trick you just captured
+            from utils.cards import card_value
+            trick_points = sum(card_value(card) for card in completed_trick)
+            logger.info(f"→ Trick was worth {trick_points} points")
+
+            # Pass that into your winner handler so it can display it
+            await handle_trick_winner(context, chat_id, winner_id, trick_points)
+            return
         else:
             # Check if the next player is an AI
             game = game_state_manager.get_game(chat_id)
@@ -581,3 +590,13 @@ async def handle_card_play(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 else:
                     # Notify the human player it's their turn
                     await notify_next_player(context, chat_id)
+    
+    # SCORING LOGGING
+    from utils.cards import card_value
+    trick_points = 0
+    
+    for card in game["trick_pile"]:
+        card_point_value = card_value(card)
+        logger.info(f"[SCORING] Adding {card[0]} of {card[1]} → {card_point_value} points")
+        trick_points += card_point_value
+        logger.info(f"[SCORING] Total trick points: {trick_points}")

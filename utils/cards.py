@@ -57,43 +57,39 @@ def card_to_filename(card: CardType) -> str:
 
 
 def card_value(card: CardType) -> int:
-    """Get the point value of a card in Li5a game.
-    
-    Args:
-        card: A (rank, suit) Tuple
-        
-    Returns:
-        Point value according to Li5a game rules:
-        - 1 point for each heart
-        - 10 points for the 10 of diamonds
-        - 13 points for the queen of spades
-        - 0 points for all other cards
-    """
+    """Get the point value of a card in Li5a game."""
     if not isinstance(card, tuple) or len(card) != 2:
         logger.error(f"Invalid card format: {card}")
         return 0
-        
+
     rank, suit = card
-    
-    # Debug printing for the card values
-    logger.debug(f"Calculating value for card: {rank} of {suit}")
-    
-    # Convert to lowercase strings and strip whitespace
+
+    # Normalize to lowercase so comparisons work
     rank_str = str(rank).lower().strip()
     suit_str = str(suit).lower().strip()
     
-    if suit_str == "hearts":
-        logger.debug(f"Heart card: {rank} of {suit} = 1 point")
-        return 1
-    elif suit_str == "diamonds" and rank_str == "10":
-        logger.debug(f"10 of diamonds = 10 points")
+    logger.info(f"card_value() → rank_str={rank_str!r}, suit_str={suit_str!r}")
+
+
+    # 10♦ is worth 10 points
+    if rank_str == "10" and suit_str == "diamonds":
+        logger.info("→ 10♦ detected: +10 points")
         return 10
-    elif suit_str == "spades" and rank_str == "queen":
-        logger.debug(f"Queen of spades = 13 points")
+
+    # ♥ are 1 point each
+    if suit_str == "hearts":
+        logger.info(f"→ Heart {rank}♥: +1 point")
+        return 1
+
+    # Q♠ is 13 points
+    if suit_str == "spades" and rank_str == "queen":
+        logger.info("→ Q♠ detected: +13 points")
         return 13
-    else:
-        logger.debug(f"No-point card: {rank} of {suit} = 0 points")
-        return 0
+
+    # everything else is 0
+    logger.info(f"→ {rank}{SUIT_SYMBOLS.get(suit, suit)} = 0 points")
+    return 0
+
 
 
 def card_sort_key(card: CardType) -> Tuple[int, int]:

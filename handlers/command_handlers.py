@@ -26,6 +26,10 @@ from utils.images import create_trick_board_image, create_hand_image
 from utils.cards import get_neighbor_position, get_card_emoji, get_team, card_value
 from telegram import InputMediaPhoto
 import asyncio
+from io import BytesIO
+from telegram.error import RetryAfter
+from telegram import InputMediaPhoto
+from utils.retry_helper import retry_on_rate_limit
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -665,91 +669,91 @@ async def handle_ai_play(context: ContextTypes.DEFAULT_TYPE, chat_id: int, ai_pl
 last_board_messages = {}  # chat_id -> message_id
 
 async def show_trick_board(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
-    """Show the current trick board in the group chat."""
-    global last_board_messages
-    
+    """Show (or edit) the current trick board image in the group chat."""
     game = game_state_manager.get_game(chat_id)
-    
     if not game or game["game_phase"] != "playing" or not game["show_board_in_group"]:
         return
-    
-    # Get current trick
+
     trick_pile = game["trick_pile"]
-    
     if not trick_pile:
         return
-    
-    # Prepare trick display
-    trick_order = ["top", "left", "bottom", "right"]
-    current_trick = []
-    
-    for pos in trick_order:
-        pos_idx = trick_order.index(pos)
-        cards_played = len(trick_pile)
-        
-        # Add cards that have been played in the correct positions
-        if pos_idx < cards_played:
-            current_trick.append(trick_pile[pos_idx])
-        else:
-            current_trick.append(None)
-    
-    # Create and send the board image
-    card_style = game["card_style"]
-    game_name = GAME_TYPES[game["game_type"]]["name"]
-    img_bytes = create_trick_board_image(current_trick, game["player_names"], card_style, game_name)
-    
-    # Check if we've already sent a board message to this chat
+
+    # 1) Generate the image once, grab its raw bytes so we can reuse it
+    raw_png = create_trick_board_image(
+        trick_pile,
+        game["player_names"],
+        game["card_style"],
+        GAME_TYPES[game["game_type"]]["name"]
+    ).getvalue()
+
+    # 2) Try to EDIT the existing message if we have one
     if chat_id in last_board_messages:
         try:
-            # Try to edit the existing message
-            message_id = last_board_messages[chat_id]
-            await context.bot.edit_message_media(
+            bio = BytesIO(raw_png)
+            await retry_on_rate_limit(context.bot.edit_message_media,
                 chat_id=chat_id,
-                message_id=message_id,
-                media=InputMediaPhoto(img_bytes, caption="Current Trick Board")
+                message_id=last_board_messages[chat_id],
+                media=InputMediaPhoto(bio, caption="Current Trick Board")
             )
             return
+        except RetryAfter as e:
+            logger.warning(f"Flood control hit, retry after {e.retry_after}s")
+            # you could schedule a retry here, or just skip this update
         except Exception as e:
-            logger.error(f"Could not update board: {e}")
-            # Fall through to sending a new message
-    
-    # If we don't have a message ID or editing failed, send a new message
-    message = await context.bot.send_photo(
-        chat_id, 
-        photo=img_bytes, 
-        caption="Current Trick Board"
-    )
-    
-    # Save this message ID for future updates
-    last_board_messages[chat_id] = message.message_id
+            logger.error(f"Could not update trick board: {e}")
+
+    # 3) Fallback: send a brand new photo
+    try:
+        bio = BytesIO(raw_png)
+        msg = await retry_on_rate_limit(context.bot.send_photo,
+            chat_id,
+            photo=bio,
+            caption="Current Trick Board"
+        )
+        # remember this message for next time
+        last_board_messages[chat_id] = msg.message_id
+    except Exception as e:
+        logger.error(f"Failed to send trick board: {e}")
 
 
-async def handle_trick_winner(context: ContextTypes.DEFAULT_TYPE, chat_id: int, winner_id: int) -> None:
+async def handle_trick_winner(context: ContextTypes.DEFAULT_TYPE, chat_id: int, winner_id: int, trick_points: int) -> None:
     """Handle the winner of a trick."""
     game = game_state_manager.get_game(chat_id)
-    
+
     if not game:
         return
-    
+
     winner_player = next((p for p in game["all_players"] if p.get_id() == winner_id), None)
-    
+
     if not winner_player:
         return
-    
+
     winner_position = winner_player.get_position()
     winner_name = winner_player.get_name()
-    
+
+    # Log and send the points in the trick
+    logger.info(f"Trick won by {winner_name} ({winner_position}) with {trick_points} points.")
+    await context.bot.send_message(
+        chat_id,
+        f"Trick won by {winner_name} ({winner_position}) with {trick_points} points."
+    )
+
     # Get a copy of the trick pile before it's reset
     trick_pile = game["trick_pile"].copy()
-    
+
     # Debug each card in the trick
     for card in trick_pile:
         rank, suit = card
         point_value = card_value(card)
         logger.debug(f"Card in trick: {rank} of {suit}, value: {point_value}")
     
-    # Calculate points for the trick
-    trick_points = sum(card_value(card) for card in trick_pile)
+    # Calculate points for the trick - log raw card data to debug
+    trick_points = 0
+    for card in trick_pile:
+        card_point_value = card_value(card)
+        logger.debug(f"Adding card value: {card} = {card_point_value} points")
+        trick_points += card_point_value
+        
     logger.debug(f"Total trick points: {trick_points}")
     
     # Use the winning card for the message
