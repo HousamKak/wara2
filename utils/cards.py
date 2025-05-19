@@ -3,12 +3,15 @@ Card utilities for the Wara2 Card Games Bot.
 """
 
 import random
+import logging
 from typing import List, Tuple, Optional
 
 from constants import SUITS, RANKS, SUIT_SYMBOLS, RANK_SYMBOLS
 
 # Type alias
 CardType = Tuple[str, str]  # (rank, suit)
+
+logger = logging.getLogger(__name__)
 
 
 def create_deck() -> List[CardType]:
@@ -54,21 +57,22 @@ def card_to_filename(card: CardType) -> str:
 
 
 def card_value(card: CardType) -> int:
-    """Get the point value of a card in Li5a game.
-    
-    Args:
-        card: A (rank, suit) Tuple
-        
-    Returns:
-        Point value according to Li5a game rules
-    """
+    """Get the point value of a card in Li5a game."""
+    if not isinstance(card, tuple) or len(card) != 2:
+        logger.error(f"Invalid card format: {card}")
+        return 0
+
     rank, suit = card
-    
-    if suit == "hearts":
+
+    # Normalize input strings
+    rank_str = str(rank).lower().strip()
+    suit_str = str(suit).lower().strip()
+
+    if suit_str == "hearts":
         return 1
-    elif suit == "diamonds" and rank == "10":
+    elif suit_str == "diamonds" and rank_str == "10":
         return 10
-    elif suit == "spades" and rank == "queen":
+    elif suit_str == "spades" and rank_str == "queen":
         return 13
     else:
         return 0

@@ -23,7 +23,7 @@ from utils.telegram_utils import (
     format_card_list
 )
 from utils.images import create_trick_board_image, create_hand_image
-from utils.cards import get_neighbor_position, get_card_emoji, get_team
+from utils.cards import get_neighbor_position, get_card_emoji, get_team, card_value
 from telegram import InputMediaPhoto
 import asyncio
 
@@ -710,51 +710,64 @@ async def show_trick_board(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> 
 async def handle_trick_winner(context: ContextTypes.DEFAULT_TYPE, chat_id: int, winner_id: int) -> None:
     """Handle the winner of a trick."""
     game = game_state_manager.get_game(chat_id)
-    
+
     if not game:
         return
-    
+
     winner_player = next((p for p in game["all_players"] if p.get_id() == winner_id), None)
-    
+
     if not winner_player:
         return
-    
+
     winner_position = winner_player.get_position()
     winner_name = winner_player.get_name()
-    
+
     # Get a copy of the trick pile before it's reset
     trick_pile = game["trick_pile"].copy()
-    
+
+    # Debug each card's value
+    for card in trick_pile:
+        rank, suit = card
+        point_value = card_value(card)
+        logger.debug(f"Card in trick: {rank} of {suit}, value: {point_value}")
+
     # Calculate points for the trick
-    from utils.cards import card_value
     trick_points = sum(card_value(card) for card in trick_pile)
-    
+    logger.debug(f"Total trick points: {trick_points}")
+
     # Use the winning card for the message
     winning_card = None
     from utils.cards import find_winner
-    
+
     # Only try to find the winning card if trick_pile is not empty
     if trick_pile:
         winner_idx = find_winner(trick_pile, game["lead_suit"])
         if 0 <= winner_idx < len(trick_pile):
             winning_card = trick_pile[winner_idx]
-    
+
     winning_card_emoji = get_card_emoji(winning_card) if winning_card else "a card"
-    
+
     # Send trick completion message to the group
-    await context.bot.send_message(
-        chat_id,
-        f"🎮 {winner_name} won the trick with {winning_card_emoji}!\n"
-        f"Points in this trick: {trick_points}"
-    )
-    
+    try:
+        await context.bot.send_message(
+            chat_id,
+            f"🎮 {winner_name} won the trick with {winning_card_emoji}!\n"
+            f"Points in this trick: {trick_points}"
+        )
+    except Exception as e:
+        logger.error(f"Error sending winner message: {e}")
+        await context.bot.send_message(
+            chat_id, 
+            f"{winner_name} won the trick!\nPoints in this trick: {trick_points}"
+        )
+
     # Update stats for human players
     if winner_id > 0:  # Human player
         stats_manager.update_stat(winner_id, "tricks_won")
-    
+
     # Check if the round is over
     round_results = game_state_manager.handle_round_end(chat_id)
-    
+
     if round_results:
         await handle_round_end(context, chat_id, round_results)
     else:
@@ -764,7 +777,7 @@ async def handle_trick_winner(context: ContextTypes.DEFAULT_TYPE, chat_id: int, 
             next_position = ["top", "left", "bottom", "right"][game["current_player_index"]]
             next_player_id = game["player_positions"][next_position]
             next_player = next((p for p in game["all_players"] if p.get_id() == next_player_id), None)
-            
+
             if next_player and next_player.is_ai:
                 # Slight delay for more natural gameplay
                 await asyncio.sleep(2)

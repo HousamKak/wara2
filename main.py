@@ -5,6 +5,7 @@ Main entry point for the Wara2 Card Games Bot.
 import os
 import logging
 import asyncio
+import sys
 from typing import Dict, List, Optional, Any
 from dotenv import load_dotenv
 
@@ -46,8 +47,8 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", 
     level=logging.INFO,
     handlers=[
-        logging.FileHandler("wara2_card_game_bot.log"),
-        logging.StreamHandler()
+        logging.FileHandler("wara2_card_game_bot.log", encoding='utf-8'),
+        logging.StreamHandler(stream=sys.stdout)  # This might help with console encoding
     ]
 )
 logger = logging.getLogger(__name__)
