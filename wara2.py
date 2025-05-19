@@ -26,6 +26,7 @@ from typing import Dict, List, Tuple, Optional, Any, Union, Set
 from datetime import datetime, timedelta
 from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont
+from dotenv import load_dotenv
 
 from telegram import (
     InlineKeyboardButton,
@@ -41,6 +42,15 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Retrieve the bot token from the environment
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+if not BOT_TOKEN:
+    raise ValueError("Bot token not found. Please set BOT_TOKEN in the .env file.")
 
 # Enable logging
 logging.basicConfig(
@@ -1579,7 +1589,7 @@ def main() -> None:
         TOKEN = "7279523998:AAHBFM5PkRpxMXPlRz3SzfQlg16AKEVRIkg"  # Replace with your bot token
     
     # Create the Application
-    application = Application.builder().token(TOKEN).build()
+    application = Application.builder().token(BOT_TOKEN).build()
     
     # Add command handlers
     application.add_handler(CommandHandler("start", start_command, filters=filters.COMMAND))
