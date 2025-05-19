@@ -514,11 +514,18 @@ async def handle_ai_gifting(context: ContextTypes.DEFAULT_TYPE, chat_id: int) ->
 
 async def process_all_gifts(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> bool:
     """Process all gifts and move to the playing phase."""
+    # Get the game state
+    game = game_state_manager.get_game(chat_id)
+    if not game:
+        return False
+    
+    # Call the main implementation in game_state_manager
     success = game_state_manager.process_all_gifts(chat_id)
     
     if not success:
         return False
     
+    # Continue with post-processing and notification
     game = game_state_manager.get_game(chat_id)
     
     # Get game type name
@@ -588,7 +595,6 @@ async def process_all_gifts(context: ContextTypes.DEFAULT_TYPE, chat_id: int) ->
         await handle_ai_play(context, chat_id, current_player)
     
     return True
-
 
 async def handle_ai_play(context: ContextTypes.DEFAULT_TYPE, chat_id: int, ai_player: AIPlayer) -> None:
     """Handle a card play by an AI player."""

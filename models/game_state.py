@@ -3,14 +3,17 @@ Game state data structures and management.
 """
 
 import random
+import logging
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Union, Set, TypedDict, Tuple
+
+# Configure logger - add this line after the imports
+logger = logging.getLogger(__name__)
 
 from constants import GamePhaseType, CardStyleType
 from models.player import Player, HumanPlayer, AIPlayer
 from utils.cards import deal_cards, card_sort_key, get_neighbor_position
 from ai.li5a_ai import Li5aAIPlayer
-
 # Type alias
 CardType = Tuple[str, str]  # (rank, suit)
 PlayerId = int
@@ -354,46 +357,46 @@ class GameStateManager:
         for player_id, hand in game["player_hands"].items():
             logger.debug(f"Player {player_id} has {len(hand)} cards before gifting")
         
-        # Transfer gifted cards
+        # COMPLETELY REWRITTEN APPROACH:
+        # 1. Create new empty hands for all players
+        # 2. Add all non-gifted cards to new hands
+        # 3. Add all received cards to new hands
+        # 4. Replace old hands with new hands
+        
         positions = ["top", "left", "bottom", "right"]
+        new_hands = {player_id: [] for player_id in game["player_hands"]}
         
-        # First pass: Remove all gifted cards from givers' hands
-        for position in positions:
-            giver_id = game["player_positions"][position]
-            gifted_cards = game["gifted_cards"][giver_id].copy()
-            
-            # Remove cards from giver's hand
-            for card in gifted_cards:
-                if card in game["player_hands"][giver_id]:
-                    game["player_hands"][giver_id].remove(card)
-                else:
-                    logger.error(f"Card {card} not found in player {giver_id}'s hand")
-            
-            # Update player object
-            for player in game["all_players"]:
-                if player.get_id() == giver_id:
-                    player.remove_from_hand(gifted_cards)
+        # Step 1: Determine which cards are kept (not gifted)
+        for player_id, hand in game["player_hands"].items():
+            gifted_cards = game["gifted_cards"].get(player_id, [])
+            # Keep cards that aren't gifted
+            kept_cards = [card for card in hand if card not in gifted_cards]
+            new_hands[player_id] = kept_cards
         
-        # Second pass: Add gifted cards to receivers' hands
+        # Step 2: Add received cards to new hands
         for position in positions:
             giver_id = game["player_positions"][position]
             receiver_position = get_neighbor_position(position)
             receiver_id = game["player_positions"][receiver_position]
             
+            # Add gifted cards to receiver's new hand
             gifted_cards = game["gifted_cards"][giver_id].copy()
+            new_hands[receiver_id].extend(gifted_cards)
+        
+        # Step 3: Replace all hands with new hands and sort them
+        for player_id, new_hand in new_hands.items():
+            # Sort the new hand
+            new_hand.sort(key=card_sort_key)
             
-            # Add cards to receiver's hand
-            game["player_hands"][receiver_id].extend(gifted_cards)
+            # Replace game state hand
+            game["player_hands"][player_id] = new_hand.copy()  # Use copy to avoid reference issues
             
-            # Sort receiver's hand
-            game["player_hands"][receiver_id].sort(key=card_sort_key)
-            
-            # Update player object
+            # Replace player object hand
             for player in game["all_players"]:
-                if player.get_id() == receiver_id:
-                    player.add_to_hand(gifted_cards)
-                    # Sort player's hand
-                    player.hand.sort(key=card_sort_key)
+                if player.get_id() == player_id:
+                    # completely replace the hand to avoid any references
+                    player.set_hand(new_hand.copy())
+                    break
         
         # Debug card counts after gifting
         for player_id, hand in game["player_hands"].items():

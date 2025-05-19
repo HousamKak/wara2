@@ -426,6 +426,9 @@ async def handle_gift_selection(update: Update, context: ContextTypes.DEFAULT_TY
         all_selected = all(len(cards) == 3 for cards in game["gifted_cards"].values())
         
         if all_selected:
+            # Call the command handler's process_all_gifts function
+            # This will in turn call game_state_manager.process_all_gifts
+            # Let it handle all the notifications and hand updates
             await process_all_gifts(context, chat_id)
 
 
