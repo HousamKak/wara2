@@ -30,6 +30,7 @@ from handlers.command_handlers import (
     end_game,
     show_help,
     show_stats,
+    debug_game_state,
 )
 from handlers.callback_handlers import handle_callback_query
 
@@ -53,6 +54,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log errors caused by updates."""
+    logger.error("Exception while handling an update:", exc_info=context.error)
+
+    # Send message to developer if it's a critical error
+    if isinstance(context.error, Exception):
+        error_text = f"⚠️ ERROR: {type(context.error).__name__}: {context.error}"
+        # Try to get chat ID
+        chat_id = None
+        if update and isinstance(update, Update) and update.effective_chat:
+            chat_id = update.effective_chat.id
+
+        logger.error(f"Error in chat {chat_id}: {error_text}")
+
+        # You can send a notification to yourself or log to a special channel
+        # await context.bot.send_message(YOUR_USER_ID, error_text)
 
 def main() -> None:
     """Start the bot."""
@@ -70,9 +87,13 @@ def main() -> None:
     application.add_handler(CommandHandler("score", show_score))
     application.add_handler(CommandHandler("toggle_board_visibility", toggle_board_visibility))
     application.add_handler(CommandHandler("stats", show_stats))
+    application.add_handler(CommandHandler("debug", debug_game_state))
     
     # Add callback query handler
     application.add_handler(CallbackQueryHandler(handle_callback_query))
+    
+    # Register the error handler
+    application.add_error_handler(error_handler)
     
     # Schedule job to clean up inactive games
     from handlers.command_handlers import cleanup_games_job
