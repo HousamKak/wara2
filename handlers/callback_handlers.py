@@ -457,8 +457,7 @@ async def handle_card_play(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     query = update.callback_query
     user_id = query.from_user.id
     data = query.data
-    
-    await query.answer()
+      # Don't answer the callback yet
     
     logger.info(f"Card play attempt by user {user_id}: {data}")
     
@@ -474,10 +473,7 @@ async def handle_card_play(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     
     if not game:
         logger.warning(f"No active game found for user {user_id}")
-        try:
-            await context.bot.send_message(user_id, "⚠️ You're not in an active game in the playing phase.")
-        except:
-            pass
+        await query.answer("You're not in an active game in the playing phase.")
         return
     
     # Check if it's this player's turn
@@ -592,3 +588,6 @@ async def handle_card_play(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 else:
                     # Notify the human player it's their turn
                     await notify_next_player(context, chat_id)
+    
+    # Only answer with success at the end if needed
+    await query.answer("Card played successfully")
