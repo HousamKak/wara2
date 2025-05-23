@@ -1,5 +1,5 @@
 """
-Callback query handlers for the Wara2 Card Games Bot.
+Callback query handlers for the Wara2 Card Games Bot - Updated for 4-message system.
 """
 
 import logging
@@ -7,7 +7,7 @@ from typing import List, Optional, Tuple, Dict, Any
 
 from telegram import Update
 from telegram.ext import ContextTypes
-import telegram.error  # Added missing import
+import telegram.error
 
 from constants import GAME_TYPES, AI_NAMES, DEFAULT_AI_DIFFICULTY
 from models.game_state import game_state_manager
@@ -16,9 +16,10 @@ from utils.telegram_utils import (
     make_card_style_keyboard,
     make_player_count_keyboard,
     make_hand_keyboard,
-    generate_ai_name
+    generate_ai_name,
+    format_card_list
 )
-from utils.cards import get_card_emoji, card_value, get_neighbor_position
+from utils.cards import get_card_emoji, card_value, get_neighbor_position, get_team
 from handlers.command_handlers import (
     setup_game,
     process_all_gifts,
@@ -26,13 +27,18 @@ from handlers.command_handlers import (
     handle_trick_winner,
     notify_next_player,
     handle_ai_play,
-    player_status_messages,
+    player_gift_messages,
+    player_board_messages,
     player_hand_messages,
-    player_trick_messages  # New tracking for trick messages
+    player_game_messages,
+    update_gift_message,
+    update_hand_message,
+    update_game_message
 )
 from telegram import InputMediaPhoto
 import asyncio
 from utils.retry_helper import retry_on_rate_limit
+from utils.images import create_hand_image
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -41,12 +47,7 @@ logger = logging.getLogger(__name__)
 CardType = Tuple[str, str]  # (rank, suit)
 
 async def safe_answer_callback(query, text: str = "") -> None:
-    """Safely answer a callback query, handling timeouts.
-    
-    Args:
-        query: The callback query to answer
-        text: Optional text to include in the answer
-    """
+    """Safely answer a callback query, handling timeouts."""
     try:
         await query.answer(text)
     except telegram.error.BadRequest as e:
@@ -84,6 +85,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     else:
         await safe_answer_callback(query, f"Unknown action: {data}")
 
+
+# ... [Keep all the game selection, style selection, etc. handlers unchanged] ...
 
 async def handle_game_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle game selection from callback."""
@@ -322,7 +325,7 @@ async def handle_difficulty_selection(update: Update, context: ContextTypes.DEFA
 
 
 async def handle_gift_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle gift card selection."""
+    """Handle gift card selection - now updates the hand message directly."""
     query = update.callback_query
     user_id = query.from_user.id
     data = query.data
@@ -340,19 +343,20 @@ async def handle_gift_selection(update: Update, context: ContextTypes.DEFAULT_TY
             break
     
     if not game:
-        await query.edit_message_text("⚠️ You're not in an active game in the gifting phase.")
+        await context.bot.send_message(user_id, "⚠️ You're not in an active game in the gifting phase.")
         return
     
     # Find the player object
     player = next((p for p in game["all_players"] if p.get_id() == user_id), None)
     
     if not player:
-        await query.edit_message_text("⚠️ Player not found in game.")
+        await context.bot.send_message(user_id, "⚠️ Player not found in game.")
         return
     
     # Get player's current hand and already selected gift cards
     hand = player.get_hand()
     gifted_cards = player.selected_cards
+    position = player.get_position()
     
     if data.startswith("gift_"):
         # Extract card info
@@ -361,7 +365,7 @@ async def handle_gift_selection(update: Update, context: ContextTypes.DEFAULT_TY
         
         # Check if the card is in the player's hand
         if selected_card not in hand:
-            await query.edit_message_text("⚠️ Invalid card selection.")
+            await safe_answer_callback(query, "Invalid card selection.")
             return
         
         # Toggle card selection
@@ -378,33 +382,18 @@ async def handle_gift_selection(update: Update, context: ContextTypes.DEFAULT_TY
         # Update the player's selected cards
         player.selected_cards = gifted_cards
         
-        # Update the keyboard
-        keyboard = make_hand_keyboard(hand, "gifting", gifted_cards)
-        
-        # Find position and recipient
-        position = player.get_position()
+        # Update the hand message (MESSAGE 3) with new selection
         gift_to_position = get_neighbor_position(position)
         recipient_name = game["player_names"].get(gift_to_position, f"the {gift_to_position.capitalize()} player")
         
-        # Create a new hand image with selected cards highlighted
-        from utils.images import create_hand_image
-        hand_img = create_hand_image(hand, gifted_cards, game["card_style"])
+        status_text = (
+            f"🎴 You are the {position.capitalize()} player in Team {get_team(position)}.\n\n"
+            f"📤 Please select 3 cards to gift to {recipient_name}.\n"
+            f"Selected: {len(gifted_cards)}/3 cards"
+        )
         
-        try:
-            await retry_on_rate_limit(query.edit_message_media,
-                media=InputMediaPhoto(
-                    media=hand_img,
-                    caption=f"Please select 3 cards to gift to {recipient_name}."
-                ),
-                reply_markup=keyboard
-            )
-        except Exception as e:
-            logger.error(f"Could not update hand image: {e}")
-            # Fall back to text update
-            await retry_on_rate_limit(query.edit_message_text,
-                text=f"Please select 3 cards to gift to {recipient_name}.",
-                reply_markup=keyboard
-            )
+        keyboard = make_hand_keyboard(hand, "gifting", gifted_cards)
+        await update_hand_message(context, user_id, hand, status_text, keyboard)  
         
     elif data == "confirm_gift":
         # Check if exactly 3 cards are selected
@@ -419,46 +408,25 @@ async def handle_gift_selection(update: Update, context: ContextTypes.DEFAULT_TY
             await safe_answer_callback(query, "Error processing gift selection.")
             return
         
-        # Find the recipient
-        position = player.get_position()
+        # Update gift message (MESSAGE 1)
+        await update_gift_message(context, user_id, gifted_cards)
+        
+        # Update hand message (MESSAGE 3) to waiting state
         gift_to_position = get_neighbor_position(position)
         recipient_name = game["player_names"].get(gift_to_position, f"the {gift_to_position.capitalize()} player")
         
-        # Update status message with confirmation
-        gifted_cards_text = ", ".join(get_card_emoji((rank, suit)) for rank, suit in gifted_cards)
+        gifted_cards_text = format_card_list(gifted_cards)
         status_text = (
-            f"✅ You've selected these 3 cards to gift to {recipient_name}:\n"
-            f"{gifted_cards_text}\n\n"
-            f"Waiting for all players to select their cards..."
+            f"🎴 You are the {position.capitalize()} player in Team {get_team(position)}.\n\n"
+            f"✅ Cards gifted to {recipient_name}: {gifted_cards_text}\n"
+            f"⏳ Waiting for all players to complete gifting..."
         )
         
-        # Update or create status message
-        if user_id in player_status_messages:
-            try:
-                await context.bot.edit_message_text(
-                    text=status_text,
-                    chat_id=user_id,
-                    message_id=player_status_messages[user_id]
-                )
-            except Exception as e:
-                logger.error(f"Could not update status message: {e}")
-                # If updating fails, try to delete old message
-                try:
-                    await query.message.delete()
-                except:
-                    pass
-                # Send new message
-                msg = await context.bot.send_message(user_id, status_text)
-                player_status_messages[user_id] = msg.message_id
-        else:
-            # Try to delete old message with keyboard
-            try:
-                await query.message.delete()
-            except:
-                pass
-            # Send new status message
-            msg = await context.bot.send_message(user_id, status_text)
-            player_status_messages[user_id] = msg.message_id
+        # No keyboard while waiting
+        await update_hand_message(context, user_id, hand, status_text, None)
+        
+        # Update game message for everyone
+        await update_game_message(context, chat_id, f"✅ {player.get_name()} has selected cards to gift.")
         
         # Check if all players have selected their cards
         all_selected = all(len(cards) == 3 for cards in game["gifted_cards"].values())
@@ -469,13 +437,10 @@ async def handle_gift_selection(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def handle_card_play(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle playing a card with no announcements in group chat.
-    Updates status message instead of sending new ones.
-    """
+    """Handle playing a card - now updates the hand message instead of deleting."""
     query = update.callback_query
     user_id = query.from_user.id
     data = query.data
-      # Don't answer the callback yet
     
     logger.info(f"Card play attempt by user {user_id}: {data}")
     
@@ -515,10 +480,7 @@ async def handle_card_play(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         
         if not player:
             logger.warning(f"Player {user_id} not found in game")
-            try:
-                await context.bot.send_message(user_id, "⚠️ Player not found in game.")
-            except:
-                pass
+            await safe_answer_callback(query, "Player not found in game.")
             return
         
         hand = player.get_hand()
@@ -526,10 +488,7 @@ async def handle_card_play(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         # Check if the card is in the player's hand
         if played_card not in hand:
             logger.warning(f"Card {rank} of {suit} not in player's hand")
-            try:
-                await context.bot.send_message(user_id, "⚠️ Card not in your hand.")
-            except:
-                pass
+            await safe_answer_callback(query, "Card not in your hand.")
             return
         
         # Check if the play is valid (following suit if required)
@@ -564,20 +523,19 @@ async def handle_card_play(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         player_name = player.get_name()
         position = player.get_position()
         
-        # Delete the old message with the keyboard
-        try:
-            await query.message.delete()
-        except Exception as e:
-            logger.error(f"Could not delete message: {e}")
+        # Update the hand message (MESSAGE 3) to waiting state
+        updated_hand = player.get_hand()  # Hand after card removal
+        status_text = (
+            f"🎴 You are the {position.capitalize()} player in Team {get_team(position)}.\n\n"
+            f"✅ You played: {card_emoji}\n"
+            f"⏳ Waiting for other players..."
+        )
         
-        # Clear hand message tracking since we deleted it
-        if user_id in player_hand_messages:
-            del player_hand_messages[user_id]
+        # No keyboard while waiting
+        await update_hand_message(context, user_id, updated_hand, status_text, None)
         
-        # Update trick message for all players
-        from handlers.command_handlers import update_trick_messages
-        trick_text = f"🎴 {player_name} ({position}) played: {card_emoji}"
-        await update_trick_messages(context, chat_id, trick_text)
+        # Update game message for all players
+        await update_game_message(context, chat_id, f"🎴 {player_name} ({position}) played: {card_emoji}")
         
         # Update the trick board in all chats
         await show_trick_board(context, chat_id)
@@ -604,5 +562,5 @@ async def handle_card_play(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                     # Notify the human player it's their turn
                     await notify_next_player(context, chat_id)
     
-    # Only answer with success at the end if needed
-    await safe_answer_callback(query, "Card played successfully")
+    # Answer callback with success
+    await safe_answer_callback(query, "Card played!")
