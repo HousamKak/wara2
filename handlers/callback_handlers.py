@@ -38,6 +38,22 @@ logger = logging.getLogger(__name__)
 # Type alias
 CardType = Tuple[str, str]  # (rank, suit)
 
+async def safe_answer_callback(query, text: str = "") -> None:
+    """Safely answer a callback query, handling timeouts.
+    
+    Args:
+        query: The callback query to answer
+        text: Optional text to include in the answer
+    """
+    try:
+        await query.answer(text)
+    except telegram.error.BadRequest as e:
+        if "query is too old" in str(e).lower() or "invalid" in str(e).lower():
+            logger.warning(f"Callback query timeout: {e}")
+        else:
+            # Re-raise other BadRequest errors
+            raise
+
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle callback queries from inline keyboards."""
     query = update.callback_query
@@ -62,9 +78,9 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await handle_card_play(update, context)
     elif data == "dummy":
         # This is a dummy callback for the disabled buttons
-        await query.answer("Select exactly 3 cards to gift.")
+        await safe_answer_callback(query, "Select exactly 3 cards to gift.")
     else:
-        await query.answer(f"Unknown action: {data}")
+        await safe_answer_callback(query, f"Unknown action: {data}")
 
 
 async def handle_game_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -74,7 +90,7 @@ async def handle_game_selection(update: Update, context: ContextTypes.DEFAULT_TY
     data = query.data
     chat_id = query.message.chat_id
     
-    await query.answer()
+    await safe_answer_callback(query)
     
     if data.startswith("game_"):
         game_type = data.split("_")[1]
@@ -105,7 +121,7 @@ async def handle_card_style_selection(update: Update, context: ContextTypes.DEFA
     data = query.data
     chat_id = query.message.chat_id
     
-    await query.answer()
+    await safe_answer_callback(query)
     
     if data.startswith("style_"):
         style = data.split("_")[1]
@@ -164,7 +180,7 @@ async def handle_player_count_selection(update: Update, context: ContextTypes.DE
     data = query.data
     chat_id = query.message.chat_id
     
-    await query.answer()
+    await safe_answer_callback(query)
     
     if data.startswith("players_"):
         try:
@@ -248,7 +264,7 @@ async def handle_difficulty_selection(update: Update, context: ContextTypes.DEFA
     data = query.data
     chat_id = query.message.chat_id
     
-    await query.answer()
+    await safe_answer_callback(query)
     
     if data.startswith("difficulty_"):
         difficulty = data.split("_")[1]
@@ -309,7 +325,7 @@ async def handle_gift_selection(update: Update, context: ContextTypes.DEFAULT_TY
     user_id = query.from_user.id
     data = query.data
     
-    await query.answer()
+    await safe_answer_callback(query)
     
     # Find which game this player is in
     game = None
@@ -352,7 +368,7 @@ async def handle_gift_selection(update: Update, context: ContextTypes.DEFAULT_TY
         else:
             # Only allow selecting up to 3 cards
             if len(gifted_cards) >= 3:
-                await query.answer("You can only select 3 cards to gift.")
+                await safe_answer_callback(query, "You can only select 3 cards to gift.")
                 return
             
             gifted_cards.append(selected_card)
@@ -391,14 +407,14 @@ async def handle_gift_selection(update: Update, context: ContextTypes.DEFAULT_TY
     elif data == "confirm_gift":
         # Check if exactly 3 cards are selected
         if len(gifted_cards) != 3:
-            await query.answer("You must select exactly 3 cards.")
+            await safe_answer_callback(query, "You must select exactly 3 cards.")
             return
         
         # Process the gift selection
         success = game_state_manager.process_gift_selection(chat_id, user_id, gifted_cards)
         
         if not success:
-            await query.answer("Error processing gift selection.")
+            await safe_answer_callback(query, "Error processing gift selection.")
             return
         
         # Find the recipient
@@ -473,7 +489,7 @@ async def handle_card_play(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     
     if not game:
         logger.warning(f"No active game found for user {user_id}")
-        await query.answer("You're not in an active game in the playing phase.")
+        await safe_answer_callback(query, "You're not in an active game in the playing phase.")
         return
     
     # Check if it's this player's turn
@@ -482,7 +498,7 @@ async def handle_card_play(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     
     if user_id != current_player_id:
         logger.warning(f"Not user's turn. Current player: {current_player_id}, User: {user_id}")
-        await query.answer("It's not your turn!")
+        await safe_answer_callback(query, "It's not your turn!")
         return
     
     if data.startswith("play_"):
@@ -523,7 +539,11 @@ async def handle_card_play(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         
         if played_card not in valid_cards:
             logger.warning(f"Card {rank} of {suit} is not a valid play")
-            await query.answer(f"You must follow the lead suit ({lead_suit})!")
+            # Enhanced error message
+            if lead_suit:
+                await safe_answer_callback(query, f"You must follow the lead suit ({lead_suit})!")
+            else:
+                await safe_answer_callback(query, "This card cannot be played!")
             return
         
         # Process the play
@@ -531,7 +551,7 @@ async def handle_card_play(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         
         if not success:
             logger.error(f"Failed to process card play: {played_card}")
-            await query.answer("Error processing card play.")
+            await safe_answer_callback(query, "Error processing card play.")
             return
         
         # Update player statistics
@@ -590,4 +610,4 @@ async def handle_card_play(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                     await notify_next_player(context, chat_id)
     
     # Only answer with success at the end if needed
-    await query.answer("Card played successfully")
+    await safe_answer_callback(query, "Card played successfully")

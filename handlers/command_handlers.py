@@ -377,6 +377,7 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• /endgame - End the current game\n"
         "• /toggle_board_visibility - Toggle board display in group\n"
         "• /score - Show current team scores\n"
+        "• /refresh - Refresh your game view if something goes wrong\n"
         "• /help - Show this help message\n\n"
         "New Feature: AI Players\n"
         "• You can now play with 1-4 human players\n"
@@ -395,6 +396,25 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     
     stats_text = stats_manager.format_player_stats(user_id, user_name)
     await update.effective_message.reply_text(stats_text)
+
+
+def reset_player_message_tracking(player_id: int) -> None:
+    """Reset message tracking for a specific player.
+    
+    Args:
+        player_id: The player's ID
+    """
+    logger.debug(f"Resetting message tracking for player {player_id}")
+    
+    # Clear tracking for this player
+    if player_id in player_hand_messages:
+        del player_hand_messages[player_id]
+    
+    if player_id in player_status_messages:
+        del player_status_messages[player_id]
+    
+    if player_id in player_board_messages:
+        del player_board_messages[player_id]
 
 
 def clear_player_message_tracking() -> None:
@@ -551,6 +571,11 @@ async def process_all_gifts(context: ContextTypes.DEFAULT_TYPE, chat_id: int) ->
     # Get updated game state
     game = game_state_manager.get_game(chat_id)
     
+    # Reset message tracking for all human players to avoid edit errors
+    for player in game["all_players"]:
+        if not player.is_ai:
+            reset_player_message_tracking(player.get_id())
+    
     # Get game type name
     game_type = game["game_type"]
     game_name = GAME_TYPES[game_type]["name"]
@@ -592,34 +617,15 @@ async def process_all_gifts(context: ContextTypes.DEFAULT_TYPE, chat_id: int) ->
                 keyboard = None
             
             try:
-                # Update or send a new hand message
+                # Since we've reset tracking, just send new messages
                 hand_img = create_hand_image(hand, None, game["card_style"])
-                if player_id in player_hand_messages:
-                    try:
-                        await retry_on_rate_limit(
-                            context.bot.edit_message_media,
-                            chat_id=player_id,
-                            message_id=player_hand_messages[player_id],
-                            media=InputMediaPhoto(hand_img, caption=hand_message),
-                            reply_markup=keyboard
-                        )
-                    except Exception as e:
-                        logger.error(f"Could not update hand message: {e}")
-                        msg = await context.bot.send_photo(
-                            player_id,
-                            photo=hand_img,
-                            caption=hand_message,
-                            reply_markup=keyboard
-                        )
-                        player_hand_messages[player_id] = msg.message_id
-                else:
-                    msg = await context.bot.send_photo(
-                        player_id,
-                        photo=hand_img,
-                        caption=hand_message,
-                        reply_markup=keyboard
-                    )
-                    player_hand_messages[player_id] = msg.message_id
+                msg = await context.bot.send_photo(
+                    player_id,
+                    photo=hand_img,
+                    caption=hand_message,
+                    reply_markup=keyboard
+                )
+                player_hand_messages[player_id] = msg.message_id
             except Exception as e:
                 logger.error(f"Could not send updated hand to player {player_id}: {e}")
     
@@ -929,130 +935,42 @@ async def notify_next_player(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -
     # Create keyboard for card selection
     keyboard = make_hand_keyboard(hand, "playing")
     
-    # Log message tracking entries for this player
-    logger.debug(f"Message tracking for player {next_player_id}:")
-    logger.debug(f"  Hand message ID: {player_hand_messages.get(next_player_id, 'None')}")
-    logger.debug(f"  Status message ID: {player_status_messages.get(next_player_id, 'None')}")
-    logger.debug(f"  Board message ID: {player_board_messages.get(next_player_id, 'None')}")
-    
     try:
         # Update status message to indicate it's the player's turn
         status_message = "🎯 It's your turn to play a card!"
-        if next_player_id in player_status_messages:
-            try:
-                logger.debug(f"Updating status message {player_status_messages[next_player_id]} for player {next_player_id}")
-                await context.bot.edit_message_text(
-                    text=status_message,
-                    chat_id=next_player_id,
-                    message_id=player_status_messages[next_player_id]
-                )
-                logger.debug("Status message updated successfully")
-            except Exception as e:
-                logger.error(f"Could not update status message: {e}")
-                logger.debug("Sending new status message")
-                msg = await context.bot.send_message(next_player_id, status_message)
-                player_status_messages[next_player_id] = msg.message_id
-                logger.debug(f"New status message sent: {msg.message_id}")
-        else:
-            logger.debug(f"No existing status message for player {next_player_id}, creating new one")
-            msg = await context.bot.send_message(next_player_id, status_message)
-            player_status_messages[next_player_id] = msg.message_id
-            logger.debug(f"New status message created: {msg.message_id}")
         
-        # Update or send the hand with keyboard
-        logger.info(f"Creating hand image for player {next_player_id}")
+        # Always send a new status message for reliability
+        msg = await context.bot.send_message(next_player_id, status_message)
+        player_status_messages[next_player_id] = msg.message_id
+        
+        # Always send a fresh hand image with keyboard for reliability
+        caption = "Select a card to play:"
         hand_img = create_hand_image(hand, None, game["card_style"])
         
-        # Check if image was created successfully
-        if not hand_img or hand_img.getbuffer().nbytes == 0:
-            logger.error(f"Hand image creation failed - buffer is empty or None")
-            # Send text message as fallback
-            await context.bot.send_message(
-                next_player_id,
-                "Error displaying your cards. Please use the following text representation:\n" +
-                "\n".join([f"{i+1}. {get_card_emoji(card)}" for i, card in enumerate(hand)])
-            )
-            return
+        # Don't try to edit - just send new
+        msg = await context.bot.send_photo(
+            next_player_id,
+            photo=hand_img, 
+            caption=caption,
+            reply_markup=keyboard
+        )
+        player_hand_messages[next_player_id] = msg.message_id
         
-        # Log buffer size for debugging
-        logger.debug(f"Hand image buffer size: {hand_img.getbuffer().nbytes} bytes")
-        
-        caption = "Select a card to play:"
-        
-        if next_player_id in player_hand_messages:
-            logger.debug(f"Updating existing hand message {player_hand_messages[next_player_id]}")
-            try:
-                # Make a copy of the buffer for the retry operation
-                hand_img.seek(0)
-                img_copy = BytesIO(hand_img.read())
-                img_copy.seek(0)
-                
-                await retry_on_rate_limit(
-                    context.bot.edit_message_media,
-                    chat_id=next_player_id,
-                    message_id=player_hand_messages[next_player_id],
-                    media=InputMediaPhoto(img_copy, caption=caption),
-                    reply_markup=keyboard
-                )
-                logger.debug("Hand message updated successfully")
-            except Exception as e:
-                logger.error(f"Could not update hand message: {e}")
-                logger.debug("Sending new hand message")
-                
-                # Reset buffer position and create new copy
-                hand_img.seek(0)
-                new_img_copy = BytesIO(hand_img.read())
-                new_img_copy.seek(0)
-                
-                try:
-                    msg = await context.bot.send_photo(
-                        next_player_id,
-                        photo=new_img_copy,
-                        caption=caption,
-                        reply_markup=keyboard
-                    )
-                    player_hand_messages[next_player_id] = msg.message_id
-                    logger.debug(f"New hand message sent: {msg.message_id}")
-                except Exception as send_e:
-                    logger.critical(f"Both update and send failed: {send_e}")
-                    # Final fallback - send as text only
-                    await context.bot.send_message(
-                        next_player_id,
-                        "Your cards (select one to play):\n" +
-                        "\n".join([f"{i+1}. {get_card_emoji(card)}" for i, card in enumerate(hand)]),
-                        reply_markup=keyboard
-                    )
-        else:
-            logger.debug(f"No existing hand message for player {next_player_id}, creating new one")
-            
-            # Reset buffer position
-            hand_img.seek(0)
-            
-            try:
-                msg = await context.bot.send_photo(
-                    next_player_id,
-                    photo=hand_img,
-                    caption=caption,
-                    reply_markup=keyboard
-                )
-                player_hand_messages[next_player_id] = msg.message_id
-                logger.debug(f"New hand message created: {msg.message_id}")
-            except Exception as e:
-                logger.error(f"Failed to send hand image: {e}")
-                # Send as text fallback
-                try:
-                    text_msg = await context.bot.send_message(
-                        next_player_id,
-                        "Your cards (select one to play):\n" +
-                        "\n".join([f"{i+1}. {get_card_emoji(card)}" for i, card in enumerate(hand)]),
-                        reply_markup=keyboard
-                    )
-                    player_hand_messages[next_player_id] = text_msg.message_id
-                    logger.debug(f"Fallback text hand message sent: {text_msg.message_id}")
-                except Exception as text_e:
-                    logger.critical(f"Even text fallback failed: {text_e}")
     except Exception as e:
-        logger.error(f"Unhandled exception in notify_next_player: {e}", exc_info=True)
+        logger.error(f"Error notifying player {next_player_id}: {e}", exc_info=True)
+        # Try a text-only fallback
+        try:
+            # Final fallback - send as text only
+            text_msg = await context.bot.send_message(
+                next_player_id,
+                "Your cards (select one to play):\n" +
+                "\n".join([f"{i+1}. {get_card_emoji(card)}" for i, card in enumerate(hand)]),
+                reply_markup=keyboard
+            )
+            player_hand_messages[next_player_id] = text_msg.message_id
+        except Exception as text_e:
+            logger.critical(f"Even text fallback failed: {text_e}")
+
 
 async def handle_round_end(context: ContextTypes.DEFAULT_TYPE, chat_id: int, results: Dict[str, Any]) -> None:
     """Handle the end of a round.
@@ -1199,102 +1117,60 @@ async def cleanup_games_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             # Clear all message tracking
             clear_player_message_tracking()
 
-def create_fresh_image_buffer(image_generator_func, *args):
-    """Safely create a BytesIO buffer with image data.
-    
-    Args:
-        image_generator_func: Function that generates the image
-        *args: Arguments to pass to the image generator function
-        
-    Returns:
-        A fresh BytesIO buffer containing the image or None if generation fails
-    """
-    try:
-        # Get the image bytes
-        buffer = image_generator_func(*args)
-        
-        # Ensure the buffer is non-empty and positioned at the start
-        if buffer and buffer.getbuffer().nbytes > 0:
-            buffer.seek(0)
-            return buffer
-        else:
-            logger.error(f"Generated empty image buffer")
-            return None
-    except Exception as e:
-        logger.error(f"Failed to generate image: {e}")
-        return None
 
-async def safe_send_photo(context, chat_id, photo_buffer, caption=None, reply_markup=None):
-    """Safely send a photo message, handling empty buffer cases.
+async def refresh_game_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Refresh the game view for the current player."""
+    chat_id = update.effective_message.chat_id
+    user_id = update.effective_message.from_user.id
     
-    Args:
-        context: Bot context
-        chat_id: Target chat ID
-        photo_buffer: BytesIO buffer with image data
-        caption: Optional caption
-        reply_markup: Optional reply markup
-        
-    Returns:
-        Message object if successful, None otherwise
-    """
-    if photo_buffer and photo_buffer.getbuffer().nbytes > 0:
-        try:
-            return await context.bot.send_photo(
-                chat_id,
-                photo=photo_buffer,
-                caption=caption,
-                reply_markup=reply_markup
-            )
-        except Exception as e:
-            logger.error(f"Error sending photo: {e}")
-            # Fallback to text-only message if image sending fails
-            try:
-                return await context.bot.send_message(
-                    chat_id,
-                    text=(caption or "Game update") + "\n\n[Image could not be displayed]",
-                    reply_markup=reply_markup
+    # Get the current game
+    game = game_state_manager.get_game(chat_id)
+    
+    if not game:
+        await update.effective_message.reply_text("No active game found in this chat.")
+        return
+    
+    # Check if the user is in the game
+    if user_id not in game["human_players"]:
+        await update.effective_message.reply_text("You're not in this game.")
+        return
+    
+    # Reset message tracking for this player
+    reset_player_message_tracking(user_id)
+    
+    # Show the trick board
+    await update.effective_message.reply_text("Refreshing your game view...")
+    await show_trick_board(context, chat_id)
+    
+    # If it's playing phase, show the player's hand
+    if game["game_phase"] == "playing":
+        player = next((p for p in game["all_players"] if p.get_id() == user_id), None)
+        if player:
+            # Check if it's their turn
+            current_position = ["top", "left", "bottom", "right"][game["current_player_index"]]
+            current_player_id = game["player_positions"].get(current_position)
+            is_current_player = user_id == current_player_id
+            
+            # Send a fresh hand image
+            hand = player.get_hand()
+            if is_current_player:
+                keyboard = make_hand_keyboard(hand, "playing")
+                msg = await context.bot.send_photo(
+                    user_id,
+                    photo=create_hand_image(hand, None, game["card_style"]),
+                    caption="It's your turn! Select a card to play:",
+                    reply_markup=keyboard
                 )
-            except Exception as e2:
-                logger.error(f"Error sending fallback message: {e2}")
-                return None
-    else:
-        # Send text-only message if buffer is empty
-        try:
-            return await context.bot.send_message(
-                chat_id,
-                text=(caption or "Game update") + "\n\n[Image could not be displayed]",
-                reply_markup=reply_markup
-            )
-        except Exception as e:
-            logger.error(f"Error sending text fallback: {e}")
-            return None
+                player_hand_messages[user_id] = msg.message_id
+            else:
+                msg = await context.bot.send_photo(
+                    user_id,
+                    photo=create_hand_image(hand, None, game["card_style"]),
+                    caption="Your current hand. Waiting for other players..."
+                )
+                player_hand_messages[user_id] = msg.message_id
 
-async def safe_edit_message_media(context, chat_id, message_id, new_media, reply_markup=None):
-    """Safely edit a message's media, with fallback options.
-    
-    Args:
-        context: Bot context
-        chat_id: Target chat ID
-        message_id: Message ID to edit
-        new_media: InputMediaPhoto object
-        reply_markup: Optional reply markup
-        
-    Returns:
-        True if successful, False otherwise
-    """
-    try:
-        await context.bot.edit_message_media(
-            chat_id=chat_id,
-            message_id=message_id,
-            media=new_media,
-            reply_markup=reply_markup
-        )
-        return True
-    except Exception as e:
-        logger.error(f"Error editing message media: {e}")
-        return False
-    
-    
+
 def debug_message_tracking() -> str:
     """Generate a debug report of message tracking dictionaries."""
     report = []
@@ -1315,6 +1191,7 @@ def debug_message_tracking() -> str:
         report.append(f"  Player {player_id}: Msg {msg_id}")
     
     return "\n".join(report)
+
 
 async def debug_game_state(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Debug command to show current game state and message tracking."""

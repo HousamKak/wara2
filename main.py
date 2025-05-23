@@ -31,6 +31,7 @@ from handlers.command_handlers import (
     show_help,
     show_stats,
     debug_game_state,
+    refresh_game_view,
 )
 from handlers.callback_handlers import handle_callback_query
 
@@ -88,6 +89,7 @@ def main() -> None:
     application.add_handler(CommandHandler("toggle_board_visibility", toggle_board_visibility))
     application.add_handler(CommandHandler("stats", show_stats))
     application.add_handler(CommandHandler("debug", debug_game_state))
+    application.add_handler(CommandHandler("refresh", refresh_game_view))
     
     # Add callback query handler
     application.add_handler(CallbackQueryHandler(handle_callback_query))
