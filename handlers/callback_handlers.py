@@ -7,6 +7,7 @@ from typing import List, Optional, Tuple, Dict, Any
 
 from telegram import Update
 from telegram.ext import ContextTypes
+import telegram.error  # Added missing import
 
 from constants import GAME_TYPES, AI_NAMES, DEFAULT_AI_DIFFICULTY
 from models.game_state import game_state_manager
@@ -26,7 +27,8 @@ from handlers.command_handlers import (
     notify_next_player,
     handle_ai_play,
     player_status_messages,
-    player_hand_messages
+    player_hand_messages,
+    player_trick_messages  # New tracking for trick messages
 )
 from telegram import InputMediaPhoto
 import asyncio
@@ -559,6 +561,8 @@ async def handle_card_play(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         
         # Get card emoji for message
         card_emoji = get_card_emoji(played_card)
+        player_name = player.get_name()
+        position = player.get_position()
         
         # Delete the old message with the keyboard
         try:
@@ -566,23 +570,14 @@ async def handle_card_play(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         except Exception as e:
             logger.error(f"Could not delete message: {e}")
         
-        # Update status message instead of sending a new one
-        status_text = f"You played: {card_emoji}\n\nWaiting for other players..."
+        # Clear hand message tracking since we deleted it
+        if user_id in player_hand_messages:
+            del player_hand_messages[user_id]
         
-        if user_id in player_status_messages:
-            try:
-                await context.bot.edit_message_text(
-                    text=status_text,
-                    chat_id=user_id,
-                    message_id=player_status_messages[user_id]
-                )
-            except Exception as e:
-                logger.error(f"Could not update status message: {e}")
-                msg = await context.bot.send_message(user_id, status_text)
-                player_status_messages[user_id] = msg.message_id
-        else:
-            msg = await context.bot.send_message(user_id, status_text)
-            player_status_messages[user_id] = msg.message_id
+        # Update trick message for all players
+        from handlers.command_handlers import update_trick_messages
+        trick_text = f"🎴 {player_name} ({position}) played: {card_emoji}"
+        await update_trick_messages(context, chat_id, trick_text)
         
         # Update the trick board in all chats
         await show_trick_board(context, chat_id)

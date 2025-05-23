@@ -39,6 +39,7 @@ last_board_messages = {}  # chat_id -> message_id
 player_board_messages = {}  # player_id -> message_id
 player_status_messages = {}  # player_id -> message_id
 player_hand_messages = {}  # player_id -> message_id
+player_trick_messages = {}  # player_id -> message_id for trick/play info
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -321,6 +322,67 @@ async def show_score(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.effective_message.reply_text("⚠️ The game hasn't started the playing phase yet.")
 
 
+async def show_tricks_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show a summary of all tricks played in the current game."""
+    chat_id = update.effective_message.chat_id
+    
+    # Check if there's a game in this chat
+    game = game_state_manager.get_game(chat_id)
+    
+    if not game:
+        await update.effective_message.reply_text("⚠️ There's no active game in this chat.")
+        return
+    
+    # Check if any tricks have been played
+    if game["game_phase"] not in ["playing", "game_over"] or not any(game["tricks_won"].values()):
+        await update.effective_message.reply_text("⚠️ No tricks have been played yet in this game.")
+        return
+    
+    # Build summary message
+    summary_lines = ["📋 Tricks Summary:\n"]
+    
+    # Count tricks and points by player
+    player_trick_counts = {}
+    player_points = {}
+    total_tricks = 0
+    
+    for player_id, tricks in game["tricks_won"].items():
+        player_name = None
+        for player in game["all_players"]:
+            if player.get_id() == player_id:
+                player_name = player.get_name()
+                position = player.get_position()
+                team = get_team(position)
+                break
+        
+        if not player_name:
+            continue
+            
+        trick_count = len(tricks)
+        total_points = sum(card_value(card) for trick in tricks for card in trick)
+        
+        player_trick_counts[player_name] = trick_count
+        player_points[player_name] = total_points
+        total_tricks += trick_count
+        
+        if trick_count > 0:
+            summary_lines.append(
+                f"\n{player_name} (Team {team}):\n"
+                f"  • Tricks won: {trick_count}\n"
+                f"  • Points taken: {total_points}"
+            )
+    
+    # Add current scores
+    summary_lines.append(
+        f"\n📊 Current Total Scores:\n"
+        f"Team A: {game['team_scores']['A']} points\n"
+        f"Team B: {game['team_scores']['B']} points\n"
+        f"\nTotal tricks played: {total_tricks}/13"
+    )
+    
+    await update.effective_message.reply_text("\n".join(summary_lines))
+
+
 async def end_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """End the current game."""
     chat_id = update.effective_message.chat_id
@@ -377,6 +439,7 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• /endgame - End the current game\n"
         "• /toggle_board_visibility - Toggle board display in group\n"
         "• /score - Show current team scores\n"
+        "• /tricks - Show summary of all tricks\n"
         "• /refresh - Refresh your game view if something goes wrong\n"
         "• /help - Show this help message\n\n"
         "New Feature: AI Players\n"
@@ -415,6 +478,9 @@ def reset_player_message_tracking(player_id: int) -> None:
     
     if player_id in player_board_messages:
         del player_board_messages[player_id]
+        
+    if player_id in player_trick_messages:
+        del player_trick_messages[player_id]
 
 
 def clear_player_message_tracking() -> None:
@@ -422,7 +488,45 @@ def clear_player_message_tracking() -> None:
     player_board_messages.clear()
     player_status_messages.clear()
     player_hand_messages.clear()
+    player_trick_messages.clear()
     last_board_messages.clear()
+
+
+async def update_trick_messages(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str) -> None:
+    """Update or create trick messages for all human players.
+    
+    Args:
+        context: The bot context
+        chat_id: The group chat ID
+        text: The message text to send
+    """
+    game = game_state_manager.get_game(chat_id)
+    if not game:
+        return
+    
+    for player in game["all_players"]:
+        if not player.is_ai:
+            player_id = player.get_id()
+            try:
+                if player_id in player_trick_messages:
+                    # Try to update existing message
+                    try:
+                        await context.bot.edit_message_text(
+                            text=text,
+                            chat_id=player_id,
+                            message_id=player_trick_messages[player_id]
+                        )
+                    except Exception as e:
+                        logger.error(f"Could not update trick message: {e}")
+                        # Send new message if update fails
+                        msg = await context.bot.send_message(player_id, text)
+                        player_trick_messages[player_id] = msg.message_id
+                else:
+                    # Send new message
+                    msg = await context.bot.send_message(player_id, text)
+                    player_trick_messages[player_id] = msg.message_id
+            except Exception as e:
+                logger.error(f"Could not send trick message to player {player_id}: {e}")
 
 
 async def setup_game(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
@@ -594,14 +698,31 @@ async def process_all_gifts(context: ContextTypes.DEFAULT_TYPE, chat_id: int) ->
     
     await context.bot.send_message(chat_id, group_message)
     
-    # Send updated hands to human players
+    # Send initial board and hand to human players
     for player in game["all_players"]:
         if not player.is_ai:
             player_id = player.get_id()
             hand = player.get_hand()
             position = player.get_position()
             
-            # Determine if it's this player's turn
+            # Send initial empty board
+            try:
+                board_img = create_trick_board_image(
+                    [],  # Empty trick pile
+                    game["player_names"],
+                    game["card_style"],
+                    GAME_TYPES[game["game_type"]]["name"]
+                )
+                msg = await context.bot.send_photo(
+                    player_id,
+                    photo=board_img,
+                    caption="Current Game Board"
+                )
+                player_board_messages[player_id] = msg.message_id
+            except Exception as e:
+                logger.error(f"Could not send initial board to player {player_id}: {e}")
+            
+            # Send hand
             is_current_player = player_id == current_player_id
             
             hand_message = (
@@ -610,14 +731,13 @@ async def process_all_gifts(context: ContextTypes.DEFAULT_TYPE, chat_id: int) ->
             )
             
             if is_current_player:
-                hand_message += "\n\n🎯 It's your turn to play a card!"
+                hand_message = "🎯 It's your turn to play a card!"
                 keyboard = make_hand_keyboard(hand, "playing")
             else:
-                hand_message += "\n\nWaiting for other players to play..."
+                hand_message = "Your current hand. Waiting for other players..."
                 keyboard = None
             
             try:
-                # Since we've reset tracking, just send new messages
                 hand_img = create_hand_image(hand, None, game["card_style"])
                 msg = await context.bot.send_photo(
                     player_id,
@@ -640,8 +760,7 @@ async def process_all_gifts(context: ContextTypes.DEFAULT_TYPE, chat_id: int) ->
 
 async def handle_ai_play(context: ContextTypes.DEFAULT_TYPE, chat_id: int, ai_player: AIPlayer) -> None:
     """Handle a card play by an AI player.
-    No announcements are made in the group chat for individual plays.
-    Only the game board is updated.
+    Updates trick messages for all players showing who played what.
     """
     game = game_state_manager.get_game(chat_id)
     if not game or game["game_phase"] != "playing":
@@ -674,6 +793,12 @@ async def handle_ai_play(context: ContextTypes.DEFAULT_TYPE, chat_id: int, ai_pl
         success = game_state_manager.process_card_play(chat_id, ai_id, played_card)
         
         if success:
+            # Update trick messages for all players
+            card_emoji = get_card_emoji(played_card)
+            ai_name = ai_player.get_name()
+            trick_text = f"🎴 {ai_name} ({position}) played: {card_emoji}"
+            await update_trick_messages(context, chat_id, trick_text)
+            
             # Update the trick board in all private chats
             await show_trick_board(context, chat_id)
             
@@ -681,7 +806,7 @@ async def handle_ai_play(context: ContextTypes.DEFAULT_TYPE, chat_id: int, ai_pl
             winner_id = game_state_manager.handle_trick_completion(chat_id)
             
             if winner_id is not None:
-                # Calculate trick points
+                # Calculate trick points  
                 trick_points = sum(card_value(card) for card in game["trick_pile"])
                 await handle_trick_winner(context, chat_id, winner_id, trick_points)
             else:
@@ -709,10 +834,7 @@ async def show_trick_board(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> 
         return
 
     trick_pile = game["trick_pile"]
-    if not trick_pile:
-        logger.warning("Trick pile is empty, nothing to display")
-        return
-
+    
     logger.info(f"Current trick has {len(trick_pile)} cards: {[get_card_emoji(card) for card in trick_pile]}")
     
     # Generate the board image once
@@ -827,10 +949,11 @@ async def show_trick_board(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> 
             except Exception as e:
                 logger.error(f"Failed to send board to player {player_id}: {e}")
 
+
 async def handle_trick_winner(context: ContextTypes.DEFAULT_TYPE, chat_id: int, winner_id: int, trick_points: int) -> None:
     """Handle the winner of a trick with consistent scoring.
     Only announces point-scoring tricks in the group chat.
-    Updates the status message for each player rather than sending new ones.
+    Updates the trick message for each player showing who took the trick.
     """
     game = game_state_manager.get_game(chat_id)
     if not game:
@@ -849,37 +972,19 @@ async def handle_trick_winner(context: ContextTypes.DEFAULT_TYPE, chat_id: int, 
     if trick_points > 0:
         await context.bot.send_message(
             chat_id,
-            f"🎮 {winner_name} ({winner_position}) won a trick with {trick_points} point{'s' if trick_points != 1 else ''} for Team {winner_team}."
+            f"🎮 {winner_name} ({winner_position}) took a trick with {trick_points} point{'s' if trick_points != 1 else ''} for Team {winner_team}."
         )
     
-    # Update status message for all human players
-    status_message = f"🎮 {winner_name} ({winner_position}) won the trick for Team {winner_team}" + (f" with {trick_points} point{'s' if trick_points != 1 else ''}." if trick_points > 0 else ".")
-    
-    for player in game["all_players"]:
-        if not player.is_ai:
-            player_id = player.get_id()
-            try:
-                # Update existing status message or send a new one
-                if player_id in player_status_messages:
-                    try:
-                        await context.bot.edit_message_text(
-                            text=status_message,
-                            chat_id=player_id,
-                            message_id=player_status_messages[player_id]
-                        )
-                    except Exception as e:
-                        logger.error(f"Could not update status message: {e}")
-                        msg = await context.bot.send_message(player_id, status_message)
-                        player_status_messages[player_id] = msg.message_id
-                else:
-                    msg = await context.bot.send_message(player_id, status_message)
-                    player_status_messages[player_id] = msg.message_id
-            except Exception as e:
-                logger.error(f"Could not send trick result to player {player_id}: {e}")
+    # Update trick message for all human players
+    trick_message = f"🏆 {winner_name} ({winner_position}) took the trick for Team {winner_team}" + (f" with {trick_points} point{'s' if trick_points != 1 else ''}!" if trick_points > 0 else "!")
+    await update_trick_messages(context, chat_id, trick_message)
     
     # Update stats for human players
     if winner_id > 0:  # Human player
         stats_manager.update_stat(winner_id, "tricks_won")
+    
+    # Wait a moment before continuing
+    await asyncio.sleep(2.0)
     
     # Check if the round is over
     round_results = game_state_manager.handle_round_end(chat_id)
@@ -887,12 +992,19 @@ async def handle_trick_winner(context: ContextTypes.DEFAULT_TYPE, chat_id: int, 
     if round_results:
         await handle_round_end(context, chat_id, round_results)
     else:
-        # Check if the next player is an AI
+        # Clear the board and start new trick
+        # First clear the board visually
+        await show_trick_board(context, chat_id)
+        
+        # Get game state for next player
         game = game_state_manager.get_game(chat_id)
         if game:
             next_position = ["top", "left", "bottom", "right"][game["current_player_index"]]
             next_player_id = game["player_positions"][next_position]
             next_player = next((p for p in game["all_players"] if p.get_id() == next_player_id), None)
+            
+            # Clear trick messages for new trick
+            await update_trick_messages(context, chat_id, "New trick starting...")
             
             if next_player and next_player.is_ai:
                 # Add "thinking time" for AI players to simulate human play and avoid rate limits
@@ -905,7 +1017,9 @@ async def handle_trick_winner(context: ContextTypes.DEFAULT_TYPE, chat_id: int, 
 
 
 async def notify_next_player(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
-    """Notify the next player it's their turn in private chat only, updating existing messages."""
+    """Notify the next player it's their turn in private chat only.
+    Sends a fresh hand image with keyboard for the player's turn.
+    """
     game = game_state_manager.get_game(chat_id)
     
     if not game or game["game_phase"] != "playing":
@@ -932,16 +1046,21 @@ async def notify_next_player(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -
     hand = next_player.get_hand()
     logger.info(f"Player {next_player_id} hand has {len(hand)} cards")
     
+    # Get valid cards for this player
+    is_first_player = len(game["trick_pile"]) == 0
+    lead_suit = game["lead_suit"]
+    valid_cards = next_player.get_valid_cards(lead_suit, is_first_player)
+    
     # Create keyboard for card selection
     keyboard = make_hand_keyboard(hand, "playing")
     
     try:
-        # Update status message to indicate it's the player's turn
-        status_message = "🎯 It's your turn to play a card!"
+        # Update trick message to indicate it's the player's turn
+        turn_message = "🎯 It's your turn to play a card!"
+        if not is_first_player and lead_suit:
+            turn_message += f" (Lead suit: {lead_suit})"
         
-        # Always send a new status message for reliability
-        msg = await context.bot.send_message(next_player_id, status_message)
-        player_status_messages[next_player_id] = msg.message_id
+        await update_trick_messages(context, chat_id, turn_message)
         
         # Always send a fresh hand image with keyboard for reliability
         caption = "Select a card to play:"
@@ -1189,6 +1308,10 @@ def debug_message_tracking() -> str:
     report.append(f"Player hand messages: {len(player_hand_messages)} entries")
     for player_id, msg_id in player_hand_messages.items():
         report.append(f"  Player {player_id}: Msg {msg_id}")
+        
+    report.append(f"Player trick messages: {len(player_trick_messages)} entries")
+    for player_id, msg_id in player_trick_messages.items():
+        report.append(f"  Player {player_id}: Msg {msg_id}")
     
     return "\n".join(report)
 
@@ -1233,6 +1356,7 @@ async def debug_game_state(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         debug_info.append(f"Player Board Messages: {len(player_board_messages)}")
         debug_info.append(f"Player Status Messages: {len(player_status_messages)}")
         debug_info.append(f"Player Hand Messages: {len(player_hand_messages)}")
+        debug_info.append(f"Player Trick Messages: {len(player_trick_messages)}")
     
     # Send debug info
     await update.effective_message.reply_text("\n".join(debug_info))

@@ -7,7 +7,7 @@ import logging
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Union, Set, TypedDict, Tuple
 
-# Configure logger - add this line after the imports
+# Configure logger
 logger = logging.getLogger(__name__)
 
 from constants import GamePhaseType, CardStyleType
@@ -232,6 +232,7 @@ class GameStateManager:
         for i, player in enumerate(game["all_players"]):
             player_id = player.get_id()
             player.set_hand(hands[i])
+            player.clear_tricks()
             game["player_hands"][player_id] = hands[i]
         
         # Set up empty gifted cards tracking
@@ -295,6 +296,9 @@ class GameStateManager:
         
         # Move to the next player
         game["current_player_index"] = (game["current_player_index"] + 1) % 4
+        
+        # Update last activity
+        game["last_activity"] = datetime.now()
         
         return True
     

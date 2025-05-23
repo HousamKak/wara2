@@ -68,28 +68,26 @@ def card_value(card: CardType) -> int:
     rank_str = str(rank).lower().strip()
     suit_str = str(suit).lower().strip()
     
-    logger.info(f"card_value() → rank_str={rank_str!r}, suit_str={suit_str!r}")
-
+    logger.debug(f"card_value() - rank_str={rank_str!r}, suit_str={suit_str!r}")
 
     # 10♦ is worth 10 points
     if rank_str == "10" and suit_str == "diamonds":
-        logger.info("→ 10♦ detected: +10 points")
+        logger.debug("10 of diamonds detected: +10 points")
         return 10
 
     # ♥ are 1 point each
     if suit_str == "hearts":
-        logger.info(f"→ Heart {rank}♥: +1 point")
+        logger.debug(f"Heart {rank} detected: +1 point")
         return 1
 
     # Q♠ is 13 points
     if suit_str == "spades" and rank_str == "queen":
-        logger.info("→ Q♠ detected: +13 points")
+        logger.debug("Queen of spades detected: +13 points")
         return 13
 
     # everything else is 0
-    logger.info(f"→ {rank}{SUIT_SYMBOLS.get(suit, suit)} = 0 points")
+    logger.debug(f"{rank} of {suit} = 0 points")
     return 0
-
 
 
 def card_sort_key(card: CardType) -> Tuple[int, int]:

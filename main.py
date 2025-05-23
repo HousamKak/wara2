@@ -32,6 +32,7 @@ from handlers.command_handlers import (
     show_stats,
     debug_game_state,
     refresh_game_view,
+    show_tricks_summary,
 )
 from handlers.callback_handlers import handle_callback_query
 
@@ -44,15 +45,22 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("Bot token not found. Please set BOT_TOKEN in the .env file.")
 
-# Enable logging
+# Enable logging with UTF-8 encoding to handle Unicode characters
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", 
     level=logging.INFO,
     handlers=[
         logging.FileHandler("wara2_card_game_bot.log", encoding='utf-8'),
-        logging.StreamHandler(stream=sys.stdout)  # This might help with console encoding
+        logging.StreamHandler(stream=sys.stdout)
     ]
 )
+
+# Force UTF-8 encoding for console output on Windows
+if sys.platform == "win32":
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+
 logger = logging.getLogger(__name__)
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -61,7 +69,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
     # Send message to developer if it's a critical error
     if isinstance(context.error, Exception):
-        error_text = f"⚠️ ERROR: {type(context.error).__name__}: {context.error}"
+        error_text = f"ERROR: {type(context.error).__name__}: {context.error}"
         # Try to get chat ID
         chat_id = None
         if update and isinstance(update, Update) and update.effective_chat:
@@ -90,6 +98,7 @@ def main() -> None:
     application.add_handler(CommandHandler("stats", show_stats))
     application.add_handler(CommandHandler("debug", debug_game_state))
     application.add_handler(CommandHandler("refresh", refresh_game_view))
+    application.add_handler(CommandHandler("tricks", show_tricks_summary))
     
     # Add callback query handler
     application.add_handler(CallbackQueryHandler(handle_callback_query))
